@@ -426,7 +426,7 @@ def main(script_args: ScriptArguments):
         return {"message": "Request received, closing communicator"}
 
     # Start the server
-    uvicorn.run(app, host=script_args.host, port=script_args.port)
+    uvicorn.run(app, host=script_args.host, port=script_args.port, access_log=False)
 
 
 def make_parser(subparsers: argparse._SubParsersAction = None):
