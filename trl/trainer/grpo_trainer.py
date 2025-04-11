@@ -12,13 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import multiprocessing
 import os
+import requests
 import textwrap
 import warnings
 from collections import defaultdict
 from contextlib import nullcontext
-from s1_tool.tools.google_retriever_v3 import google_retriever,python_interpreter
+from s1_tool.tools.google_retriever_v3 import google_retriever,python_interpreter, remove_python_prefix
 from typing import Any, Callable, Optional, Sized, Union
+from tqdm import tqdm
 
 import time
 import torch
@@ -69,10 +72,208 @@ if is_peft_available():
 if is_wandb_available():
     import wandb
 
+SYSTEM_PROMPT = """<|im_start|>system\nYou are Qwen, created by Alibaba Cloud. You are a helpful assistant.
+You will also be an expert assistant using chain-of-thought thinking and tool calling to solve difficult problems.
+For tool calling, you may call an external retriever or python interpreter.
+Here's a more detailed instruction to for tool calling.
+- If at any stage of your thinking, you feel like the thinking will benefit from web retrieval for accurate sourcing, insert new token <|im_start|>retrieval immediately after that segment. Then, insert the question to ask for the web retrieval. Finally, insert <|im_start|>result\n after the question.
+- Similarly, if any stage of the thinking requires the use of a python interpreter, insert new token <|im_start|>python immediately after the formula that need to be calculated. Then, insert the latex formula that needs to be computed by the calculator. Finally, add <|im_start|>result\n.
+- The use of python interpreter can be for precise computation of formula, writing code for debugging/experiment/plotting.
+- Only call python interpreter for computation if you think the computation is difficult or you are doing the computation wrong.
+<|im_end|>\n"""
+
+
 # What we call a reward function is a callable that takes a list of prompts and completions and returns a list of
 # rewards. When it's a string, it's a model ID, so it's loaded as a pretrained model.
 RewardFunc = Union[str, PreTrainedModel, Callable[[list, list], list[float]]]
 
+
+def _simple_generate(
+    prompts: list[str],
+    max_tokens: int,
+    args,
+) -> list[list[str]]:
+    session = requests.Session()
+    url = f"http://{args.vllm_server_host}:{args.vllm_server_port}/generate/"
+    response = session.post(
+        url,
+        json={
+            "prompts": prompts,
+            "n": args.num_generations,
+            "repetition_penalty": args.repetition_penalty,
+            "temperature": args.temperature,
+            "top_p": args.top_p,
+            "top_k": -1 if args.top_k is None else args.top_k,
+            "min_p": 0.0 if args.min_p is None else args.min_p,
+            "max_tokens": max_tokens,
+            "guided_decoding_regex": args.vllm_guided_decoding_regex,
+        },
+    )
+    if response.status_code == 200:
+        return response.json()["completion_ids"]
+    else:
+        raise Exception(f"Request failed: {response.status_code}, {response.text}")
+
+
+def _generate_with_tool_safe(input_argument: dict) -> str:
+    
+    def _generate_with_tool(
+        question: str, args
+    ) -> str:
+        """
+        Generates text from the LLM using vLLM in a streaming fashion.
+        The generation monitors for trigger pairs:
+        - A "<im_start>python" token followed by a "<im_start>result" token.
+        - A "<im_start>retrieval" token followed by a "<im_start>result" token.
+        When a "<im_start>result" token is encountered, the function:
+        1. Pops the last trigger from a stack.
+        2. Extracts the text between the trigger and "<im_start>result".
+        3. Calls the corresponding external tool (python_interpreter or google_retriever)
+            using the extracted query segment.
+        4. Inserts a newline and the tool's output immediately after "<im_start>result".
+        Generation then resumes with the updated context.
+        """        
+        # Initialize the context
+        context = SYSTEM_PROMPT + "<|im_start|>user\n" + question + "\n<|im_end|>\n<|im_start|>assistant\n<|im_start|>think\n"
+        
+        MAX_TOKENS = 8192
+        tokens_left = MAX_TOKENS
+        prompt_idx = len(context)
+        start_total_time = time.time()
+        tool_use = False
+        
+        while True:
+            gen_start = time.time()
+            # completion = client.completions.create(
+            #     model=model_path,
+            #     prompt=context,
+            #     max_tokens=tokens_left,
+            #     stop=['<|im_start|>result', '<|im_end|>'],
+            #     temperature=0.0,
+            # )
+            completion_ids = _simple_generate(
+                    prompts=[context],
+                    max_tokens=tokens_left,
+                    args=args,
+                )
+            tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path)
+            completion_text = tokenizer.batch_decode(completion_ids)
+            
+            gen_duration = time.time() - gen_start
+            print(f"[Time] LLM generation took {gen_duration:.2f} seconds. Stop reason {completion.choices[0].finish_reason}.")
+            # Append the new output to the context
+            context = context + completion_text
+            # print("\n\n-------------------- Context Content ------------------")
+            # print(context[-100:])
+            # print("--------------------------------------------------------------\n\n")
+            tokens_left -= len(completion_ids)
+            # If the result token is present, process the code execution
+            last_python = context[prompt_idx:].rfind("<|im_start|>python")
+            last_retrieval = context[prompt_idx:].rfind("<|im_start|>retrieval")
+            last_result = context[prompt_idx:].rfind("<|im_start|>result")
+            print(f"[Info] last_python {last_python}, last_retrieval {last_retrieval}, last_result {last_result}")
+            
+            if last_result != -1:
+                tool_use = True
+                
+            if (last_result > last_python and last_result > last_retrieval) or (last_python == -1 and last_retrieval == -1) or tokens_left == 0:
+                context += "\n<|im_start|>answer\n"
+                # completion = client.completions.create(
+                #     model=model_path,
+                #     prompt=context,
+                #     max_tokens=512,
+                #     stop=['<|im_end|>'],
+                #     temperature=0.0,
+                # )
+                completion_ids = _simple_generate(
+                    prompts=[context],
+                    max_tokens=512,
+                    args=args,
+                )
+                context += '\n<|im_end|>'
+                break
+            
+            # After the previous if argument, now the stop reason must be getting a <|im_start|>result.
+            if completion.choices[0].finish_reason == "stop":
+                context += '\n<|im_start|>result\n'
+                
+            if last_python>last_retrieval:
+                
+                # Find the last occurrence of <im_start>python in the context
+                last_tool_index = context.rfind("<|im_start|>python")
+                result_index = context.rfind("<|im_start|>result")
+                
+                # Extract the code to run from context (between <im_start>python and <im_start>result)
+                code_to_run = context[last_tool_index + len("<|im_start|>python"):result_index]
+                code_to_run = remove_python_prefix(code_to_run)
+                
+                # Execute the code using the python_interpreter function and get the result
+                tool_start = time.time()
+                
+                new_code = None
+                try:
+                    new_code,execution_result = python_interpreter(code_to_run)
+                except Exception as e:
+                    import traceback
+                    print(f"[ERROR] Exception for question:\n{question}\n")
+                    traceback.print_exc()
+                
+                tool_duration = time.time() - tool_start
+                print(f"[Time] Python tool call took {tool_duration:.2f} seconds")
+                
+                if new_code is not None:
+                    context = context[:last_tool_index]+new_code+'\n<|im_start|>result\n'+execution_result+"\n<|im_start|>continue\n"
+                else:
+                    context = context[:last_tool_index]+'\n<|im_start|>result\n'+"\n<|im_start|>continue\n"
+                
+                tool_use = True
+            else:
+            
+                # Find the last occurrence of <im_start>python in the context
+                last_tool_index = context.rfind("<|im_start|>retrieval")
+                result_index = context.rfind("<|im_start|>result")
+                
+                # Extract the code to run from context (between <im_start>python and <im_start>result)
+                query = context[last_tool_index + len("<|im_start|>retrieval\n"):result_index]
+                # Execute the code using the python_interpreter function and get the result
+                tool_start = time.time()
+                
+                execution_result = None
+                try:
+                    print(f"Query for google retrieval: '{query}'")
+                    execution_result = google_retriever(query)
+                except Exception as e:
+                    import traceback
+                    print(f"[ERROR] Exception for question:\n{question}\n")
+                    traceback.print_exc()
+                    
+                tool_duration = time.time() - tool_start
+                print(f"[Time] Retrieval tool call took {tool_duration:.2f} seconds")
+                # Insert the execution result right after the <im_start>result token in the context
+                insertion_point = result_index + len("<|im_start|>result\n")
+                if execution_result is not None:
+                    context = context[:insertion_point] + execution_result.response + "\n<|im_start|>continue\n"
+                else:
+                    context = context[:insertion_point] + "\n<|im_start|>continue\n"
+                    
+                tool_use = True
+
+        total_duration = time.time() - start_total_time
+        print(f"[Time] Total processing time: {total_duration:.2f} seconds")
+        print(f"[INFO] Generated {MAX_TOKENS - tokens_left} tokens")
+        
+        return context, tool_use
+    
+    
+    question = input_argument['question']
+    args = input_argument['args']
+    try:
+        return _generate_with_tool(question, args)
+    except Exception as e:
+        import traceback
+        print(f"[ERROR] Exception for question:\n{question}\n")
+        traceback.print_exc()
+        return f"[ERROR] {str(e)}", False
 
 class RepeatRandomSampler(Sampler):
     """
@@ -479,7 +680,10 @@ class GRPOTrainer(Trainer):
                 self.vllm_client = VLLMClient(
                     args.vllm_server_host, args.vllm_server_port, connection_timeout=args.vllm_server_timeout
                 )
-
+                self.args = args
+                # args.vllm_server_host, args.vllm_server_port, args.vllm_server_timeout
+                # 0.0.0.0 8000 120.0
+                
             # vLLM specific sampling arguments
             self.guided_decoding_regex = args.vllm_guided_decoding_regex
 
@@ -675,150 +879,32 @@ class GRPOTrainer(Trainer):
             # In evaluation, we don't reuse completions across multiple updates, so we don't need to buffer inputs.
             inputs = self._generate_and_score_completions(inputs)
         return inputs
-    
-    def _generate_with_tool(
-        self, question: str
-    ) -> str:
-        """
-        Generates text from the LLM using vLLM in a streaming fashion.
-        The generation monitors for trigger pairs:
-        - A "<im_start>python" token followed by a "<im_start>result" token.
-        - A "<im_start>retrieval" token followed by a "<im_start>result" token.
-        When a "<im_start>result" token is encountered, the function:
-        1. Pops the last trigger from a stack.
-        2. Extracts the text between the trigger and "<im_start>result".
-        3. Calls the corresponding external tool (python_interpreter or google_retriever)
-            using the extracted query segment.
-        4. Inserts a newline and the tool's output immediately after "<im_start>result".
-        Generation then resumes with the updated context.
-        """
-        
-        client = OpenAI(
-            base_url="http://localhost:8000/v1",
-            api_key="token-abc123",
-            timeout=1200,
-        )
-        model_path = os.getenv("MODEL_PATH", "/gscratch/zlab/swj0419/zeyichen/s1-tool/ckpts/s1-20250405_005808_1.5B")
-        
-        # Initialize the context
-        context = SYSTEM_PROMPT + "<|im_start|>user\n" + question + "\n<|im_end|>\n<|im_start|>assistant\n<|im_start|>think\n"
-        
-        MAX_TOKENS = 8192
-        tokens_left = MAX_TOKENS
-        prompt_idx = len(context)
-        start_total_time = time.time()
-        tool_use = False
-        
-        while True:
-            gen_start = time.time()
-            completion = client.completions.create(
-                model=model_path,
-                prompt=context,
-                max_tokens=tokens_left,
-                stop=['<|im_start|>result', '<|im_end|>'],
-                temperature=0.0,
-            )
-            new_output = completion.choices[0].text
-            
-            gen_duration = time.time() - gen_start
-            print(f"[Time] LLM generation took {gen_duration:.2f} seconds. Stop reason {completion.choices[0].finish_reason}.")
-            # Append the new output to the context
-            context = context + new_output
-            # print("\n\n-------------------- Context Content ------------------")
-            # print(context[-100:])
-            # print("--------------------------------------------------------------\n\n")
-            tokens_left -= completion.usage.completion_tokens
-            # If the result token is present, process the code execution
-            last_python = context[prompt_idx:].rfind("<|im_start|>python")
-            last_retrieval = context[prompt_idx:].rfind("<|im_start|>retrieval")
-            last_result = context[prompt_idx:].rfind("<|im_start|>result")
-            print(f"[Info] last_python {last_python}, last_retrieval {last_retrieval}, last_result {last_result}")
-            
-            if last_result != -1:
-                tool_use = True
-                
-            if (last_result > last_python and last_result > last_retrieval) or (last_python == -1 and last_retrieval == -1) or tokens_left == 0:
-                context += "\n<|im_start|>answer\n"
-                completion = client.completions.create(
-                    model=model_path,
-                    prompt=context,
-                    max_tokens=512,
-                    stop=['<|im_end|>'],
-                    temperature=0.0,
-                )
-                context += '\n<|im_end|>'
-                break
-            
-            # After the previous if argument, now the stop reason must be getting a <|im_start|>result.
-            if completion.choices[0].finish_reason == "stop":
-                context += '\n<|im_start|>result\n'
-                
-            if last_python>last_retrieval:
-                
-                # Find the last occurrence of <im_start>python in the context
-                last_tool_index = context.rfind("<|im_start|>python")
-                result_index = context.rfind("<|im_start|>result")
-                
-                # Extract the code to run from context (between <im_start>python and <im_start>result)
-                code_to_run = context[last_tool_index + len("<|im_start|>python"):result_index]
-                code_to_run = remove_python_prefix(code_to_run)
-                
-                # Execute the code using the python_interpreter function and get the result
-                tool_start = time.time()
-                
-                new_code = None
-                try:
-                    new_code,execution_result = python_interpreter(code_to_run)
-                except Exception as e:
-                    import traceback
-                    print(f"[ERROR] Exception for question:\n{question}\n")
-                    traceback.print_exc()
-                
-                tool_duration = time.time() - tool_start
-                print(f"[Time] Python tool call took {tool_duration:.2f} seconds")
-                
-                if new_code is not None:
-                    context = context[:last_tool_index]+new_code+'\n<|im_start|>result\n'+execution_result+"\n<|im_start|>continue\n"
-                else:
-                    context = context[:last_tool_index]+'\n<|im_start|>result\n'+"\n<|im_start|>continue\n"
-                
-                tool_use = True
-            else:
-            
-                # Find the last occurrence of <im_start>python in the context
-                last_tool_index = context.rfind("<|im_start|>retrieval")
-                result_index = context.rfind("<|im_start|>result")
-                
-                # Extract the code to run from context (between <im_start>python and <im_start>result)
-                query = context[last_tool_index + len("<|im_start|>retrieval\n"):result_index]
-                # Execute the code using the python_interpreter function and get the result
-                tool_start = time.time()
-                
-                execution_result = None
-                try:
-                    print(f"Query for google retrieval: '{query}'")
-                    execution_result = google_retriever(query)
-                except Exception as e:
-                    import traceback
-                    print(f"[ERROR] Exception for question:\n{question}\n")
-                    traceback.print_exc()
-                    
-                tool_duration = time.time() - tool_start
-                print(f"[Time] Retrieval tool call took {tool_duration:.2f} seconds")
-                # Insert the execution result right after the <im_start>result token in the context
-                insertion_point = result_index + len("<|im_start|>result\n")
-                if execution_result is not None:
-                    context = context[:insertion_point] + execution_result.response + "\n<|im_start|>continue\n"
-                else:
-                    context = context[:insertion_point] + "\n<|im_start|>continue\n"
-                    
-                tool_use = True
 
-        total_duration = time.time() - start_total_time
-        print(f"[Time] Total processing time: {total_duration:.2f} seconds")
-        print(f"[INFO] Generated {MAX_TOKENS - tokens_left} tokens")
+    def _generate_with_tool_batch_parallel(self, questions: list, max_processes: int = 20) -> list:
+        """
+        Batch inference - Parallel version using multiprocessing.
+        Maintains a pool of `max_processes` workers and processes questions as workers free up.
+        """
+        bar = tqdm(total=len(questions))
+        results = []
+        TOOL_USE = 0
         
-        return context, tool_use
+        input_arguments = [
+            {
+                "question": questions[i],
+                "args": self.args
+            } for i in range(len(questions))
+        ]
+        
+        with multiprocessing.Pool(processes=max_processes) as pool:
+            for result, tool_use in pool.imap(_generate_with_tool_safe, input_arguments):
+                # results.append(result)
+                if tool_use:
+                    TOOL_USE += 1
+                    results.append(result)
+                bar.update(1)
+        return results, TOOL_USE
+
 
     def _generate_and_score_completions(
         self, inputs: dict[str, Union[torch.Tensor, Any]]
@@ -836,7 +922,7 @@ class GRPOTrainer(Trainer):
             prompt_ids = prompt_ids[:, -self.max_prompt_length :]
             prompt_mask = prompt_mask[:, -self.max_prompt_length :]
         
-        import IPython; IPython.embed()
+        # import IPython; IPython.embed()
         # Generate completions using either vLLM or regular generation
         if self.args.use_vllm:
             # First, have main process load weights if needed
@@ -853,17 +939,18 @@ class GRPOTrainer(Trainer):
                 ordered_set_of_prompts = all_prompts_text[:: self.num_generations]
                 with profiling_context(self, "vLLM.generate"):
                     # TODO: change to tools inference
-                    completion_ids = self.vllm_client.generate(
-                        prompts=ordered_set_of_prompts,
-                        n=self.num_generations,
-                        repetition_penalty=self.repetition_penalty,
-                        temperature=self.temperature,
-                        top_p=self.top_p,
-                        top_k=-1 if self.top_k is None else self.top_k,
-                        min_p=0.0 if self.min_p is None else self.min_p,
-                        max_tokens=self.max_completion_length,
-                        guided_decoding_regex=self.guided_decoding_regex,
-                    )
+                    completion_ids = self._generate_with_tool_batch_parallel(ordered_set_of_prompts)
+                    # completion_ids = self.vllm_client.generate(
+                    #     prompts=ordered_set_of_prompts,
+                    #     n=self.num_generations,
+                    #     repetition_penalty=self.repetition_penalty,
+                    #     temperature=self.temperature,
+                    #     top_p=self.top_p,
+                    #     top_k=-1 if self.top_k is None else self.top_k,
+                    #     min_p=0.0 if self.min_p is None else self.min_p,
+                    #     max_tokens=self.max_completion_length,
+                    #     guided_decoding_regex=self.guided_decoding_regex,
+                    # )
             else:
                 completion_ids = [None] * len(all_prompts_text)
             # Broadcast the completions from the main process to all processes, ensuring each process receives its
