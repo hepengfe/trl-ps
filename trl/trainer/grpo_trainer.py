@@ -945,10 +945,11 @@ class GRPOTrainer(Trainer):
                 # Since 'prompts' contains 'num_generations' duplicates, we first take unique prompts, and generate
                 # num_generations outputs for each one. This is faster than generating outputs for each duplicate
                 # prompt individually.
-                ordered_set_of_prompts = all_prompts_text[:: self.num_generations]
+                # this is disabled in tool calling
+                # ordered_set_of_prompts = all_prompts_text[:: self.num_generations]
                 with profiling_context(self, "vLLM.generate"):
                     # TODO: change to tools inference
-                    completion_ids, num_tool_use = self._generate_with_tool_batch_parallel(ordered_set_of_prompts, 20)
+                    completion_ids, num_tool_use = self._generate_with_tool_batch_parallel(all_prompts_text, 20)
                     # completion_ids = self.vllm_client.generate(
                     #     prompts=ordered_set_of_prompts,
                     #     n=self.num_generations,
