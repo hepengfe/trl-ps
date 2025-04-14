@@ -17,7 +17,8 @@ import ctypes
 import logging
 import os
 from dataclasses import dataclass, field
-from typing import Optional, Sequence
+from typing import Optional, Sequence, Optional, Union, List
+
 
 import torch
 
@@ -307,9 +308,11 @@ def main(script_args: ScriptArguments):
         min_p: float = 0.0
         max_tokens: int = 16
         guided_decoding_regex: Optional[str] = None
+        stop: Optional[Union[str, List[str]]] = None
 
     class GenerateResponse(BaseModel):
         completion_ids: list[list[int]]
+        completion_text: list[str]
 
     @app.post("/generate/", response_model=GenerateResponse)
     async def generate(request: GenerateRequest):
@@ -351,10 +354,12 @@ def main(script_args: ScriptArguments):
             min_p=request.min_p,
             max_tokens=request.max_tokens,
             guided_decoding=guided_decoding,
+            stop=request.stop,
         )
         all_outputs = llm.generate(request.prompts, sampling_params=sampling_params)
         completion_ids = [list(output.token_ids) for outputs in all_outputs for output in outputs.outputs]
-        return {"completion_ids": completion_ids}
+        completion_text = [output.text for outputs in all_outputs for output in outputs.outputs]
+        return {"completion_ids": completion_ids, "completion_text": completion_text}
 
     class InitCommunicatorRequest(BaseModel):
         host: str

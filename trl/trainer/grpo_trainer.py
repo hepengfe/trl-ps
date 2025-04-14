@@ -27,6 +27,7 @@ import time
 import torch
 import torch.utils.data
 import transformers
+import trl
 from accelerate.utils import broadcast_object_list, gather, gather_object, is_peft_model, set_seed
 from datasets import Dataset, IterableDataset
 from packaging import version
@@ -45,6 +46,7 @@ from transformers import (
 )
 from transformers.integrations.deepspeed import is_deepspeed_zero3_enabled
 from transformers.utils import is_peft_available
+from typing import Any, Dict, List, Optional, Set, Union
 
 from ..data_utils import apply_chat_template, is_conversational, maybe_apply_chat_template
 from ..extras.profiling import profiling_context, profiling_decorator
@@ -88,10 +90,11 @@ Here's a more detailed instruction to for tool calling.
 RewardFunc = Union[str, PreTrainedModel, Callable[[list, list], list[float]]]
 
 
-def _simple_generate(
+def _make_generate_requests(
     prompts: list[str],
     max_tokens: int,
-    args,
+    args: trl.GRPOConfig,
+    stop: Optional[Union[str, List[str]]] = None,
 ) -> list[list[str]]:
     session = requests.Session()
     url = f"http://{args.vllm_server_host}:{args.vllm_server_port}/generate/"
@@ -107,10 +110,11 @@ def _simple_generate(
             "min_p": 0.0 if args.min_p is None else args.min_p,
             "max_tokens": max_tokens,
             "guided_decoding_regex": args.vllm_guided_decoding_regex,
+            "stop": stop,
         },
     )
     if response.status_code == 200:
-        return response.json()["completion_ids"]
+        return response.json()["completion_ids"], response.json()["completion_text"]
     else:
         raise Exception(f"Request failed: {response.status_code}, {response.text}")
 
@@ -136,11 +140,11 @@ def _generate_with_tool_safe(input_argument: dict) -> str:
         # Initialize the context
         context = SYSTEM_PROMPT + "<|im_start|>user\n" + question + "\n<|im_end|>\n<|im_start|>assistant\n<|im_start|>think\n"
         
-        MAX_TOKENS = 8192
-        tokens_left = MAX_TOKENS
+        tokens_left = args.max_completion_length
         prompt_idx = len(context)
         start_total_time = time.time()
         tool_use = False
+        return_ids = None
         
         while True:
             gen_start = time.time()
@@ -151,16 +155,19 @@ def _generate_with_tool_safe(input_argument: dict) -> str:
             #     stop=['<|im_start|>result', '<|im_end|>'],
             #     temperature=0.0,
             # )
-            completion_ids = _simple_generate(
+            completion_ids, completion_text = _make_generate_requests(
                     prompts=[context],
                     max_tokens=tokens_left,
                     args=args,
+                    stop=['<|im_start|>result', '<|im_end|>'],
                 )
-            tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path)
-            completion_text = tokenizer.batch_decode(completion_ids)
-            
+            completion_ids, completion_text = completion_ids[0], completion_text[0]
+            # tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path)
+            # completion_text = tokenizer.batch_decode(completion_ids)
+            # print(completion_text)
             gen_duration = time.time() - gen_start
-            print(f"[Time] LLM generation took {gen_duration:.2f} seconds. Stop reason {completion.choices[0].finish_reason}.")
+            # print(f"[Time] LLM generation took {gen_duration:.2f} seconds. Stop reason {completion.choices[0].finish_reason}.")
+            print(f"[Time] LLM generation took {gen_duration:.2f} seconds.")
             # Append the new output to the context
             context = context + completion_text
             # print("\n\n-------------------- Context Content ------------------")
@@ -185,7 +192,7 @@ def _generate_with_tool_safe(input_argument: dict) -> str:
                 #     stop=['<|im_end|>'],
                 #     temperature=0.0,
                 # )
-                completion_ids = _simple_generate(
+                return_ids, completion_text = _make_generate_requests(
                     prompts=[context],
                     max_tokens=512,
                     args=args,
@@ -194,8 +201,7 @@ def _generate_with_tool_safe(input_argument: dict) -> str:
                 break
             
             # After the previous if argument, now the stop reason must be getting a <|im_start|>result.
-            if completion.choices[0].finish_reason == "stop":
-                context += '\n<|im_start|>result\n'
+            context += '\n<|im_start|>result\n'
                 
             if last_python>last_retrieval:
                 
@@ -260,9 +266,9 @@ def _generate_with_tool_safe(input_argument: dict) -> str:
 
         total_duration = time.time() - start_total_time
         print(f"[Time] Total processing time: {total_duration:.2f} seconds")
-        print(f"[INFO] Generated {MAX_TOKENS - tokens_left} tokens")
+        print(f"[INFO] Generated {args.max_completion_length - tokens_left} tokens")
         
-        return context, tool_use
+        return return_ids[0], tool_use
     
     
     question = input_argument['question']
@@ -552,6 +558,9 @@ class GRPOTrainer(Trainer):
         if processing_class is None:
             processing_class = AutoTokenizer.from_pretrained(model.config._name_or_path, padding_side="left")
 
+        # allow tokenizer recreation in subprocesses
+        args.model_name_or_path = model.config._name_or_path
+        
         # Reward functions
         if not isinstance(reward_funcs, list):
             reward_funcs = [reward_funcs]
@@ -887,7 +896,7 @@ class GRPOTrainer(Trainer):
         """
         bar = tqdm(total=len(questions))
         results = []
-        TOOL_USE = 0
+        num_tool_use = 0
         
         input_arguments = [
             {
@@ -900,10 +909,10 @@ class GRPOTrainer(Trainer):
             for result, tool_use in pool.imap(_generate_with_tool_safe, input_arguments):
                 # results.append(result)
                 if tool_use:
-                    TOOL_USE += 1
-                    results.append(result)
+                    num_tool_use += 1
+                results.append(result)
                 bar.update(1)
-        return results, TOOL_USE
+        return results, num_tool_use
 
 
     def _generate_and_score_completions(
@@ -939,7 +948,7 @@ class GRPOTrainer(Trainer):
                 ordered_set_of_prompts = all_prompts_text[:: self.num_generations]
                 with profiling_context(self, "vLLM.generate"):
                     # TODO: change to tools inference
-                    completion_ids = self._generate_with_tool_batch_parallel(ordered_set_of_prompts)
+                    completion_ids, num_tool_use = self._generate_with_tool_batch_parallel(ordered_set_of_prompts, 20)
                     # completion_ids = self.vllm_client.generate(
                     #     prompts=ordered_set_of_prompts,
                     #     n=self.num_generations,
@@ -965,6 +974,7 @@ class GRPOTrainer(Trainer):
             # Pad the completions, and concatenate them with the prompts
             completion_ids = [torch.tensor(ids, device=device) for ids in completion_ids]
             completion_ids = pad(completion_ids, padding_value=self.processing_class.pad_token_id)
+            print(prompt_ids.shape, completion_ids.shape)
             prompt_completion_ids = torch.cat([prompt_ids, completion_ids], dim=1)
         else:
             # Regular generation path
