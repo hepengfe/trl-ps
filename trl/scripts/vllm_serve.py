@@ -812,6 +812,18 @@ def main(script_args: ScriptArguments):
         )
         request_id = random_uuid()
         results_generator = llm.generate(request.prompts, sampling_params, request_id)
+        results_generator = engine.generate(
+        example_input["prompt"],
+        SamplingParams(temperature=example_input["temperature"]),
+        example_input["request_id"])
+        # get the results
+        final_output = None
+        async for request_output in results_generator:
+        if await request.is_disconnected():
+            # Abort the request if the client disconnects.
+            await engine.abort(request_id)
+            # Return or raise an error
+            final_output = request_output
         # Non-streaming case
         final_output = None
         try:
