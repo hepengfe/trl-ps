@@ -712,7 +712,17 @@ def main(script_args: ScriptArguments):
     #     worker_cls=WeightSyncWorker,
     # )
     
-    engine_args = AsyncEngineArgs.from_cli_args(script_args)
+    engine_args = AsyncEngineArgs()
+    engine_args.model = script_args.model
+    engine_args.revision = script_args.revision
+    engine_args.tensor_parallel_size = script_args.tensor_parallel_size
+    engine_args.gpu_memory_utilization = script_args.gpu_memory_utilization
+    engine_args.dtype = script_args.dtype
+    # Automatic Prefix Caching caches the KV cache of existing queries, so that a new query can
+    # directly reuse the KV cache if it shares the same prefix with one of the existing queries.
+    # This is particularly useful here because we generate completions from the same prompts.
+    engine_args.enable_prefix_caching = script_args.enable_prefix_caching
+    engine_args.max_model_len = script_args.max_model_len
     llm = AsyncLLMEngine.from_engine_args(
                   engine_args, usage_context=UsageContext.API_SERVER)
 
@@ -740,7 +750,7 @@ def main(script_args: ScriptArguments):
         {"tensor_parallel_size": 8}
         ```
         """
-        return {"tensor_parallel_size": llm.llm_engine.parallel_config.tensor_parallel_size}
+        return {"tensor_parallel_size": llm.engine.parallel_config.tensor_parallel_size}
 
     class GenerateRequest(BaseModel):
         prompts: list[str]
@@ -800,7 +810,6 @@ def main(script_args: ScriptArguments):
             guided_decoding=guided_decoding,
             stop=request.stop,
         )
-        # all_outputs = llm.generate(request.prompts, sampling_params=sampling_params)
         request_id = random_uuid()
         results_generator = llm.generate(request.prompts, sampling_params, request_id)
         # Non-streaming case
@@ -832,7 +841,7 @@ def main(script_args: ScriptArguments):
                 - `world_size` (`int`): Total number of participating processes in the group.
         """
         background_tasks.add_task(
-            llm.collective_rpc,
+            llm.engine.model_executor.collective_rpc,
             "init_communicator",
             args=(request.host, request.port, script_args.tensor_parallel_size + 1),
         )
@@ -863,7 +872,7 @@ def main(script_args: ScriptArguments):
         # And with background_tasks.add_task we need to call it this way:
         # background_tasks.add_task(llm.collective_rpc, "update_named_param", args=("name", torch.float32, (10, 10)))
         dtype = torch.__getattribute__(request.dtype.split(".")[-1])
-        background_tasks.add_task(llm.collective_rpc, "update_named_param", args=(request.name, dtype, request.shape))
+        background_tasks.add_task(llm.engine.model_executor.collective_rpc, "update_named_param", args=(request.name, dtype, request.shape))
 
         return {"message": "Request received, updating named parameter"}
 
@@ -872,7 +881,7 @@ def main(script_args: ScriptArguments):
         """
         Resets the prefix cache for the model.
         """
-        success = llm.llm_engine.reset_prefix_cache()
+        success = llm.engine.reset_prefix_cache()
         return {"message": "Request received, resetting prefix cache status: " + str(success)}
 
     @app.post("/close_communicator/")
