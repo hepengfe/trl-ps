@@ -1,4 +1,4 @@
-# Copyright 2025 The HuggingFace Team. All rights reserved.
+# Copyright 2020-2025 The HuggingFace Team. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -18,9 +18,9 @@ import asyncio
 import ctypes
 import logging
 import os
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Optional, Sequence, Optional, Union, List
-
 
 import torch
 
@@ -40,19 +40,7 @@ if is_pydantic_available():
 if is_uvicorn_available():
     import uvicorn
 
-# When no GPU is available, importing 'Worker' from 'vllm.worker.worker' fails with the following error:
-# libcuda.so.1: cannot open shared object file: No such file or directory.
-# To prevent this error, we check if libcuda is available before importing 'Worker'. While this check is not
-# crucial—since vLLM and TRL are not intended to run without a GPU—it helps avoid errors when running CI on a machine
-# without a GPU.
-try:
-    ctypes.CDLL("libcuda.so.1")
-except OSError:
-    libcuda_available = False
-else:
-    libcuda_available = True
-
-if is_vllm_available() and libcuda_available:
+if is_vllm_available():
     from vllm import LLM, SamplingParams, AsyncEngineArgs, AsyncLLMEngine
     from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
     from vllm.distributed.parallel_state import get_world_group
@@ -72,26 +60,18 @@ logger = logging.getLogger(__name__)
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
 
-class WeightSyncWorker(Worker):
+class WeightSyncWorkerExtension:
     """
-    A vLLM worker that enables weight synchronization between a client and multiple server workers.
+    A vLLM worker extension that enables weight synchronization between a client and multiple server workers.
 
     This worker uses a `StatelessProcessGroup` to establish communication and a `PyNcclCommunicator` to handle
     efficient GPU-based communication using NCCL. The primary purpose of this class is to receive updated model weights
     from a client process and distribute them to all worker processes participating in model inference.
     """
 
-    def __init__(self, *args, **kwargs):
-        if not is_vllm_available():
-            raise ImportError(
-                "vLLM is required to use the WeightSyncWorker. Please install it using `pip install vllm`."
-            )
-
-        super().__init__(*args, **kwargs)
-
-        # The following attributes are initialized when `init_communicator` method is called.
-        self.pynccl_comm = None  # Communicator for weight updates
-        self.client_rank = None  # Source rank for broadcasting updated weights
+    # The following attributes are initialized when `init_communicator` method is called.
+    pynccl_comm = None  # Communicator for weight updates
+    client_rank = None  # Source rank for broadcasting updated weights
 
     def init_communicator(self, host: str, port: int, world_size: int) -> None:
         """
@@ -263,40 +243,40 @@ def main(script_args: ScriptArguments):
     if not is_vllm_available():
         raise ImportError("vLLM is required to run the vLLM serve script. Please install it using `pip install vllm`.")
 
-    # llm = LLM(
-    #     model=script_args.model,
-    #     revision=script_args.revision,
-    #     tensor_parallel_size=script_args.tensor_parallel_size,
-    #     gpu_memory_utilization=script_args.gpu_memory_utilization,
-    #     dtype=script_args.dtype,
-    #     # Automatic Prefix Caching caches the KV cache of existing queries, so that a new query can
-    #     # directly reuse the KV cache if it shares the same prefix with one of the existing queries.
-    #     # This is particularly useful here because we generate completions from the same prompts.
-    #     enable_prefix_caching=script_args.enable_prefix_caching,
-    #     max_model_len=script_args.max_model_len,
-    #     worker_cls=WeightSyncWorker,
-    # )
+    llm = LLM(
+        model=script_args.model,
+        revision=script_args.revision,
+        tensor_parallel_size=script_args.tensor_parallel_size,
+        gpu_memory_utilization=script_args.gpu_memory_utilization,
+        dtype=script_args.dtype,
+        # Automatic Prefix Caching caches the KV cache of existing queries, so that a new query can
+        # directly reuse the KV cache if it shares the same prefix with one of the existing queries.
+        # This is particularly useful here because we generate completions from the same prompts.
+        enable_prefix_caching=script_args.enable_prefix_caching,
+        max_model_len=script_args.max_model_len,
+        worker_extension_cls="trl.scripts.vllm_serve.WeightSyncWorkerExtension",
+    )
     
-    engine_args = AsyncEngineArgs()
-    engine_args.model = script_args.model
-    engine_args.revision = script_args.revision
-    engine_args.tensor_parallel_size = script_args.tensor_parallel_size
-    engine_args.gpu_memory_utilization = script_args.gpu_memory_utilization
-    engine_args.dtype = script_args.dtype
-    # Automatic Prefix Caching caches the KV cache of existing queries, so that a new query can
-    # directly reuse the KV cache if it shares the same prefix with one of the existing queries.
-    # This is particularly useful here because we generate completions from the same prompts.
-    engine_args.enable_prefix_caching = script_args.enable_prefix_caching
-    engine_args.max_model_len = script_args.max_model_len
-    engine_args.worker_cls='trl.scripts.vllm_serve.WeightSyncWorker'
+#     engine_args = AsyncEngineArgs()
+#     engine_args.model = script_args.model
+#     engine_args.revision = script_args.revision
+#     engine_args.tensor_parallel_size = script_args.tensor_parallel_size
+#     engine_args.gpu_memory_utilization = script_args.gpu_memory_utilization
+#     engine_args.dtype = script_args.dtype
+#     # Automatic Prefix Caching caches the KV cache of existing queries, so that a new query can
+#     # directly reuse the KV cache if it shares the same prefix with one of the existing queries.
+#     # This is particularly useful here because we generate completions from the same prompts.
+#     engine_args.enable_prefix_caching = script_args.enable_prefix_caching
+#     engine_args.max_model_len = script_args.max_model_len
+#     engine_args.worker_cls='trl.scripts.vllm_serve.WeightSyncWorker'
     
-    # print("--------------executor class is -------------")
-    # print(AsyncLLMEngine._get_executor_cls(engine_config=engine_args.create_engine_config(UsageContext.API_SERVER)))
-    # print("--------------------------------------------------")
-    # when tp_size=2, executor cls is <class 'vllm.executor.mp_distributed_executor.MultiprocessingDistributedExecutor'>
+#     # print("--------------executor class is -------------")
+#     # print(AsyncLLMEngine._get_executor_cls(engine_config=engine_args.create_engine_config(UsageContext.API_SERVER)))
+#     # print("--------------------------------------------------")
+#     # when tp_size=2, executor cls is <class 'vllm.executor.mp_distributed_executor.MultiprocessingDistributedExecutor'>
     
-    llm = AsyncLLMEngine.from_engine_args(
-                  engine_args, usage_context=UsageContext.API_SERVER)
+#     llm = AsyncLLMEngine.from_engine_args(
+#                   engine_args, usage_context=UsageContext.API_SERVER)
 
     app = FastAPI()
 
@@ -322,7 +302,8 @@ def main(script_args: ScriptArguments):
         {"tensor_parallel_size": 8}
         ```
         """
-        return {"tensor_parallel_size": llm.engine.parallel_config.tensor_parallel_size}
+        return {"tensor_parallel_size": llm.llm_engine.vllm_config.parallel_config.tensor_parallel_size}
+#         return {"tensor_parallel_size": llm.engine.parallel_config.tensor_parallel_size}
 
     class GenerateRequest(BaseModel):
         prompt: str
