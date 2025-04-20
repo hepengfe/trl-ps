@@ -91,7 +91,7 @@ RewardFunc = Union[str, PreTrainedModel, Callable[[list, list], list[float]]]
 
 
 def _make_generate_requests(
-    prompts: list[str],
+    prompt: str,
     max_tokens: int,
     args: trl.GRPOConfig,
     stop: Optional[Union[str, List[str]]] = None,
@@ -101,8 +101,8 @@ def _make_generate_requests(
     response = session.post(
         url,
         json={
-            "prompts": prompts,
-            "n": args.num_generations,
+            "prompt": prompt,
+            "n": 1, # tool inference requires each process to handle one thinking trajectory
             "repetition_penalty": args.repetition_penalty,
             "temperature": args.temperature,
             "top_p": args.top_p,
@@ -156,7 +156,7 @@ def _generate_with_tool_safe(input_argument: dict) -> str:
             #     temperature=0.0,
             # )
             completion_ids, completion_text = _make_generate_requests(
-                    prompts=[context],
+                    prompt=context,
                     max_tokens=tokens_left,
                     args=args,
                     stop=['<|im_start|>result', '<|im_end|>'],
@@ -193,7 +193,7 @@ def _generate_with_tool_safe(input_argument: dict) -> str:
                 #     temperature=0.0,
                 # )
                 return_ids, completion_text = _make_generate_requests(
-                    prompts=[context],
+                    prompts=context,
                     max_tokens=512,
                     args=args,
                 )
