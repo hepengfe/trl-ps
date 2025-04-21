@@ -49,6 +49,7 @@ if is_vllm_available():
     from vllm.worker.worker import Worker
     from vllm.usage.usage_lib import UsageContext
     from vllm.utils import FlexibleArgumentParser, random_uuid, set_ulimit
+    import vllm.envs as envs
 else:
     Worker = object
 
@@ -243,41 +244,36 @@ def main(script_args: ScriptArguments):
     if not is_vllm_available():
         raise ImportError("vLLM is required to run the vLLM serve script. Please install it using `pip install vllm`.")
 
-    llm = LLM(
-        model=script_args.model,
-        revision=script_args.revision,
-        tensor_parallel_size=script_args.tensor_parallel_size,
-        gpu_memory_utilization=script_args.gpu_memory_utilization,
-        dtype=script_args.dtype,
-        # Automatic Prefix Caching caches the KV cache of existing queries, so that a new query can
-        # directly reuse the KV cache if it shares the same prefix with one of the existing queries.
-        # This is particularly useful here because we generate completions from the same prompts.
-        enable_prefix_caching=script_args.enable_prefix_caching,
-        max_model_len=script_args.max_model_len,
-        worker_extension_cls="trl.scripts.vllm_serve.WeightSyncWorkerExtension",
-    )
     
-#     engine_args = AsyncEngineArgs()
-#     engine_args.model = script_args.model
-#     engine_args.revision = script_args.revision
-#     engine_args.tensor_parallel_size = script_args.tensor_parallel_size
-#     engine_args.gpu_memory_utilization = script_args.gpu_memory_utilization
-#     engine_args.dtype = script_args.dtype
-#     # Automatic Prefix Caching caches the KV cache of existing queries, so that a new query can
-#     # directly reuse the KV cache if it shares the same prefix with one of the existing queries.
-#     # This is particularly useful here because we generate completions from the same prompts.
-#     engine_args.enable_prefix_caching = script_args.enable_prefix_caching
-#     engine_args.max_model_len = script_args.max_model_len
-#     engine_args.worker_cls='trl.scripts.vllm_serve.WeightSyncWorker'
+    engine_args = AsyncEngineArgs()
+    engine_args.model = script_args.model
+    engine_args.revision = script_args.revision
+    engine_args.tensor_parallel_size = script_args.tensor_parallel_size
+    engine_args.gpu_memory_utilization = script_args.gpu_memory_utilization
+    engine_args.dtype = script_args.dtype
+    # Automatic Prefix Caching caches the KV cache of existing queries, so that a new query can
+    # directly reuse the KV cache if it shares the same prefix with one of the existing queries.
+    # This is particularly useful here because we generate completions from the same prompts.
+    engine_args.enable_prefix_caching = script_args.enable_prefix_caching
+    engine_args.max_model_len = script_args.max_model_len
+    engine_args.worker_extension_cls = 'trl.scripts.vllm_serve.WeightSyncWorkerExtension'
+    engine_args.disable_log_stats = False
+        
+    envs.VLLM_USE_V1 = True
+    vllm_config = engine_args.create_engine_config(usage_context=UsageContext.API_SERVER)
     
-#     # print("--------------executor class is -------------")
-#     # print(AsyncLLMEngine._get_executor_cls(engine_config=engine_args.create_engine_config(UsageContext.API_SERVER)))
-#     # print("--------------------------------------------------")
-#     # when tp_size=2, executor cls is <class 'vllm.executor.mp_distributed_executor.MultiprocessingDistributedExecutor'>
-    
-#     llm = AsyncLLMEngine.from_engine_args(
-#                   engine_args, usage_context=UsageContext.API_SERVER)
+    if envs.VLLM_USE_V1:
+        from vllm.v1.engine.async_llm import AsyncLLM as V1AsyncLLMEngine
+        async_engine_cls = V1AsyncLLMEngine
 
+    llm = async_engine_cls.from_vllm_config(
+        vllm_config=vllm_config,
+        start_engine_loop=True,
+        usage_context=UsageContext.API_SERVER,
+        stat_loggers=None,
+        disable_log_stats=engine_args.disable_log_stats,
+        disable_log_requests=engine_args.disable_log_requests,
+    )
     app = FastAPI()
 
     # Define the endpoints for the model server
@@ -302,8 +298,7 @@ def main(script_args: ScriptArguments):
         {"tensor_parallel_size": 8}
         ```
         """
-        return {"tensor_parallel_size": llm.llm_engine.vllm_config.parallel_config.tensor_parallel_size}
-#         return {"tensor_parallel_size": llm.engine.parallel_config.tensor_parallel_size}
+        return {"tensor_parallel_size": llm.processor.vllm_config.parallel_config.tensor_parallel_size}
 
     class GenerateRequest(BaseModel):
         prompt: str
@@ -381,9 +376,7 @@ def main(script_args: ScriptArguments):
                 final_output = request_output
         except asyncio.CancelledError:
             return Response(status_code=499)
-        # print(final_output)
         
-        # completion_ids = [list(output.token_ids) for outputs in final_output for output in outputs.outputs]
         completion_ids = [final_output.outputs[0].token_ids]
         completion_text = [final_output.outputs[0].text]
         return {"completion_ids": completion_ids, "completion_text": completion_text}
@@ -406,7 +399,7 @@ def main(script_args: ScriptArguments):
                 - `world_size` (`int`): Total number of participating processes in the group.
         """
         background_tasks.add_task(
-            llm.engine.model_executor.collective_rpc,
+            llm.engine_core.collective_rpc_async,
             "init_communicator",
             args=(request.host, request.port, script_args.tensor_parallel_size + 1),
         )
@@ -437,7 +430,7 @@ def main(script_args: ScriptArguments):
         # And with background_tasks.add_task we need to call it this way:
         # background_tasks.add_task(llm.collective_rpc, "update_named_param", args=("name", torch.float32, (10, 10)))
         dtype = torch.__getattribute__(request.dtype.split(".")[-1])
-        background_tasks.add_task(llm.engine.model_executor.collective_rpc, "update_named_param", args=(request.name, dtype, request.shape))
+        background_tasks.add_task(llm.engine_core.collective_rpc_async, "update_named_param", args=(request.name, dtype, request.shape))
 
         return {"message": "Request received, updating named parameter"}
 
@@ -446,7 +439,7 @@ def main(script_args: ScriptArguments):
         """
         Resets the prefix cache for the model.
         """
-        success = llm.engine.reset_prefix_cache()
+        success = await llm.engine_core.reset_prefix_cache_async()
         return {"message": "Request received, resetting prefix cache status: " + str(success)}
 
     @app.post("/close_communicator/")
@@ -454,7 +447,7 @@ def main(script_args: ScriptArguments):
         """
         Closes the weight update group and cleans up associated resources.
         """
-        llm.engine.model_executor.collective_rpc("close_communicator")
+        await llm.engine_core.collective_rpc_async("close_communicator")
         return {"message": "Request received, closing communicator"}
 
     # Start the server

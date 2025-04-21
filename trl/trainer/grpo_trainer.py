@@ -20,9 +20,9 @@ import warnings
 from collections import defaultdict, deque
 from collections.abc import Sized
 from contextlib import nullcontext
-# from s1_tool.tools.google_retriever_v3 import google_retriever,python_interpreter, remove_python_prefix
+from s1_tool.tools.google_retriever_v3 import google_retriever,python_interpreter, remove_python_prefix
 from typing import Any, Callable, Optional, Sized, Union
-# from tqdm import tqdm
+from tqdm import tqdm
 
 import time
 import torch
@@ -197,7 +197,7 @@ def _generate_with_tool_safe(input_argument: dict) -> str:
                 #     temperature=0.0,
                 # )
                 return_ids, completion_text = _make_generate_requests(
-                    prompts=context,
+                    prompt=context,
                     max_tokens=512,
                     args=args,
                 )
