@@ -1111,9 +1111,7 @@ class GRPOTrainer(Trainer):
         sequence_indices = torch.arange(is_eos.size(1), device=device).expand(is_eos.size(0), -1)
         completion_mask = (sequence_indices <= eos_idx.unsqueeze(1)).int()
 
-        # Log the metrics 1
-        mode = "eval" if self.control.should_evaluate else "train"
-        # log completion lengths, mean, min, max
+        # log completion lengths, mean, min, max here to avoid truncation changing them
         agg_completion_mask = self.accelerator.gather_for_metrics(completion_mask.sum(1))
         self._metrics[mode]["completions/mean_length"].append(agg_completion_mask.float().mean().item())
         self._metrics[mode]["completions/min_length"].append(agg_completion_mask.float().min().item())
