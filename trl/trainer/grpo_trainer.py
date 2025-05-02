@@ -1111,6 +1111,15 @@ class GRPOTrainer(Trainer):
         sequence_indices = torch.arange(is_eos.size(1), device=device).expand(is_eos.size(0), -1)
         completion_mask = (sequence_indices <= eos_idx.unsqueeze(1)).int()
 
+        # Log the metrics 1
+        mode = "eval" if self.control.should_evaluate else "train"
+        # log completion lengths, mean, min, max
+        agg_completion_mask = self.accelerator.gather_for_metrics(completion_mask.sum(1))
+        self._metrics[mode]["completions/mean_length"].append(agg_completion_mask.float().mean().item())
+        self._metrics[mode]["completions/min_length"].append(agg_completion_mask.float().min().item())
+        self._metrics[mode]["completions/max_length"].append(agg_completion_mask.float().max().item())
+
+
         # If mask_truncated_completions is enabled, zero out truncated completions in completion_mask
         if self.mask_truncated_completions:
             truncated_completions = ~is_eos.any(dim=1)
@@ -1118,6 +1127,23 @@ class GRPOTrainer(Trainer):
 
         # Concatenate prompt_mask with completion_mask for logit computation
         attention_mask = torch.cat([prompt_mask, completion_mask], dim=1)  # (B, P+C)
+
+        if mode == "train":
+            self.state.num_input_tokens_seen += self.accelerator.gather_for_metrics(attention_mask.sum()).sum().item()
+        self._metrics[mode]["num_tokens"] = [self.state.num_input_tokens_seen]
+
+        # identify sequences that terminated with EOS and log their lengths
+        agg_terminated_with_eos = self.accelerator.gather_for_metrics(is_eos.any(dim=1))
+        term_completion_mask = agg_completion_mask[agg_terminated_with_eos]
+        clipped_completions_ratio = 1 - len(term_completion_mask) / len(agg_completion_mask)
+        self._metrics[mode]["completions/clipped_ratio"].append(clipped_completions_ratio)
+        if len(term_completion_mask) == 0:
+            # edge case where no completed sequences are found
+            term_completion_mask = torch.zeros(1, device=device)
+        self._metrics[mode]["completions/mean_terminated_length"].append(term_completion_mask.float().mean().item())
+        self._metrics[mode]["completions/min_terminated_length"].append(term_completion_mask.float().min().item())
+        self._metrics[mode]["completions/max_terminated_length"].append(term_completion_mask.float().max().item())
+
 
         logits_to_keep = completion_ids.size(1)  # we only need to compute the logits for the completion tokens
         batch_size = self.args.per_device_train_batch_size if mode == "train" else self.args.per_device_eval_batch_size
@@ -1207,29 +1233,6 @@ class GRPOTrainer(Trainer):
         )
         advantages = advantages[process_slice]
 
-        # Log the metrics
-        if mode == "train":
-            self.state.num_input_tokens_seen += self.accelerator.gather_for_metrics(attention_mask.sum()).sum().item()
-        self._metrics[mode]["num_tokens"] = [self.state.num_input_tokens_seen]
-
-        # log completion lengths, mean, min, max
-        agg_completion_mask = self.accelerator.gather_for_metrics(completion_mask.sum(1))
-        self._metrics[mode]["completions/mean_length"].append(agg_completion_mask.float().mean().item())
-        self._metrics[mode]["completions/min_length"].append(agg_completion_mask.float().min().item())
-        self._metrics[mode]["completions/max_length"].append(agg_completion_mask.float().max().item())
-
-        # identify sequences that terminated with EOS and log their lengths
-        agg_terminated_with_eos = self.accelerator.gather_for_metrics(is_eos.any(dim=1))
-        term_completion_mask = agg_completion_mask[agg_terminated_with_eos]
-        clipped_completions_ratio = 1 - len(term_completion_mask) / len(agg_completion_mask)
-        self._metrics[mode]["completions/clipped_ratio"].append(clipped_completions_ratio)
-        if len(term_completion_mask) == 0:
-            # edge case where no completed sequences are found
-            term_completion_mask = torch.zeros(1, device=device)
-        self._metrics[mode]["completions/mean_terminated_length"].append(term_completion_mask.float().mean().item())
-        self._metrics[mode]["completions/min_terminated_length"].append(term_completion_mask.float().min().item())
-        self._metrics[mode]["completions/max_terminated_length"].append(term_completion_mask.float().max().item())
-
         # Calculate mean reward per function, but only for samples where the function was applied (non-NaN values)
         for i, reward_func_name in enumerate(self.reward_func_names):
             mean_rewards = torch.nanmean(rewards_per_func[:, i]).item()
@@ -1242,6 +1245,8 @@ class GRPOTrainer(Trainer):
         # Log prompt and completion texts
         self._textual_logs["prompt"].extend(gather_object(prompts_text))
         self._textual_logs["completion"].extend(gather_object(completions_text))
+        if "answer" in inputs:
+            self._textual_logs["answer"].extend(gather_object([x["answer"] for x in inputs]))
         for i, name in enumerate(self.reward_func_names):
             self._textual_logs["rewards"][name].extend(rewards_per_func[:, i].tolist())
 
