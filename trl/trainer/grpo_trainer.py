@@ -12,18 +12,25 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import multiprocessing
 import os
+import requests
 import textwrap
 import warnings
 from collections import defaultdict, deque
 from collections.abc import Sized
 from contextlib import nullcontext
-from typing import Any, Callable, Optional, Union
+from s1_tool.tools.google_retriever_v3 import google_retriever,python_interpreter, remove_python_prefix
+from typing import Any, Callable, Optional, Sized, Union
+from tqdm import tqdm
 
 import datasets
+import time
+
 import torch
 import torch.utils.data
 import transformers
+import trl
 from accelerate.utils import broadcast_object_list, gather, gather_object, is_peft_model, set_seed
 from datasets import Dataset, IterableDataset
 from packaging import version
@@ -44,6 +51,8 @@ from transformers import (
 from transformers.integrations.deepspeed import is_deepspeed_zero3_enabled
 from transformers.trainer_utils import seed_worker
 from transformers.utils import is_datasets_available, is_peft_available
+from typing import Any, Dict, List, Optional, Set, Union
+
 
 from ..data_utils import apply_chat_template, is_conversational, maybe_apply_chat_template
 from ..extras.profiling import profiling_context, profiling_decorator
@@ -76,9 +85,212 @@ if is_vllm_available():
 if is_wandb_available():
     import wandb
 
+SYSTEM_PROMPT = """<|im_start|>system\nYou are Qwen, created by Alibaba Cloud. You are a helpful assistant.
+You will also be an expert assistant using chain-of-thought thinking and tool calling to solve difficult problems.
+For tool calling, you may call an external retriever or python interpreter.
+Here's a more detailed instruction to for tool calling.
+- If at any stage of your thinking, you feel like the thinking will benefit from web retrieval for accurate sourcing, insert new token <|im_start|>retrieval immediately after that segment. Then, insert the question to ask for the web retrieval. Finally, insert <|im_start|>result\n after the question.
+- Similarly, if any stage of the thinking requires the use of a python interpreter, insert new token <|im_start|>python immediately after the formula that need to be calculated. Then, insert the latex formula that needs to be computed by the calculator. Finally, add <|im_start|>result\n.
+- The use of python interpreter can be for precise computation of formula, writing code for debugging/experiment/plotting.
+- Only call python interpreter for computation if you think the computation is difficult or you are doing the computation wrong.
+<|im_end|>\n"""
+
+
 # What we call a reward function is a callable that takes a list of prompts and completions and returns a list of
 # rewards. When it's a string, it's a model ID, so it's loaded as a pretrained model.
 RewardFunc = Union[str, PreTrainedModel, Callable[[list, list], list[float]]]
+
+
+def _make_generate_requests(
+    prompt: str,
+    max_tokens: int,
+    args: trl.GRPOConfig,
+    stop: Optional[Union[str, List[str]]] = None,
+) -> list[list[str]]:
+    session = requests.Session()
+    url = f"http://{args.vllm_server_host}:{args.vllm_server_port}/generate/"
+    response = session.post(
+        url,
+        json={
+            "prompt": prompt,
+            "n": 1, # tool inference requires each process to handle one thinking trajectory
+            "repetition_penalty": args.repetition_penalty,
+            "temperature": args.temperature,
+            "top_p": args.top_p,
+            "top_k": -1 if args.top_k is None else args.top_k,
+            "min_p": 0.0 if args.min_p is None else args.min_p,
+            "max_tokens": max_tokens,
+            "guided_decoding_regex": args.vllm_guided_decoding_regex,
+            "stop": stop,
+        },
+    )
+    if response.status_code == 200:
+        return response.json()["completion_ids"], response.json()["completion_text"]
+    else:
+        raise Exception(f"Request failed: {response.status_code}, {response.text}")
+
+
+def _generate_with_tool_safe(input_argument: dict) -> str:
+    
+    def _generate_with_tool(
+        question: str, args
+    ) -> str:
+        """
+        Generates text from the LLM using vLLM in a streaming fashion.
+        The generation monitors for trigger pairs:
+        - A "<im_start>python" token followed by a "<im_start>result" token.
+        - A "<im_start>retrieval" token followed by a "<im_start>result" token.
+        When a "<im_start>result" token is encountered, the function:
+        1. Pops the last trigger from a stack.
+        2. Extracts the text between the trigger and "<im_start>result".
+        3. Calls the corresponding external tool (python_interpreter or google_retriever)
+            using the extracted query segment.
+        4. Inserts a newline and the tool's output immediately after "<im_start>result".
+        Generation then resumes with the updated context.
+        """        
+        # Initialize the context
+        context = SYSTEM_PROMPT + "<|im_start|>user\n" + question + "\n<|im_end|>\n<|im_start|>assistant\n<|im_start|>think\n"
+        
+        tokens_left = args.max_completion_length
+        prompt_idx = len(context)
+        start_total_time = time.time()
+        tool_use = False
+        return_ids = None
+        
+        while True:
+            gen_start = time.time()
+            # completion = client.completions.create(
+            #     model=model_path,
+            #     prompt=context,
+            #     max_tokens=tokens_left,
+            #     stop=['<|im_start|>result', '<|im_end|>'],
+            #     temperature=0.0,
+            # )
+            completion_ids, completion_text = _make_generate_requests(
+                    prompt=context,
+                    max_tokens=tokens_left,
+                    args=args,
+                    stop=['<|im_start|>result', '<|im_end|>'],
+                )
+            completion_ids, completion_text = completion_ids[0], completion_text[0]
+            # tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path)
+            # completion_text = tokenizer.batch_decode(completion_ids)
+            # print(completion_text)
+            gen_duration = time.time() - gen_start
+            # print(f"[Time] LLM generation took {gen_duration:.2f} seconds. Stop reason {completion.choices[0].finish_reason}.")
+            print(f"[Time] LLM generation took {gen_duration:.2f} seconds.")
+            # Append the new output to the context
+            context = context + completion_text
+            # print("\n\n-------------------- Context Content ------------------")
+            # print(context[-100:])
+            # print("--------------------------------------------------------------\n\n")
+            tokens_left -= len(completion_ids)
+            # If the result token is present, process the code execution
+            last_python = context[prompt_idx:].rfind("<|im_start|>python")
+            last_retrieval = context[prompt_idx:].rfind("<|im_start|>retrieval")
+            last_result = context[prompt_idx:].rfind("<|im_start|>result")
+            print(f"[Info] last_python {last_python}, last_retrieval {last_retrieval}, last_result {last_result}")
+            
+            if last_result != -1:
+                tool_use = True
+                
+            if (last_result > last_python and last_result > last_retrieval) or (last_python == -1 and last_retrieval == -1) or tokens_left == 0:
+                context += "\n<|im_start|>answer\n"
+                # completion = client.completions.create(
+                #     model=model_path,
+                #     prompt=context,
+                #     max_tokens=512,
+                #     stop=['<|im_end|>'],
+                #     temperature=0.0,
+                # )
+                return_ids, completion_text = _make_generate_requests(
+                    prompt=context,
+                    max_tokens=512,
+                    args=args,
+                )
+                context += '\n<|im_end|>'
+                break
+            
+            # After the previous if argument, now the stop reason must be getting a <|im_start|>result.
+            context += '\n<|im_start|>result\n'
+                
+            if last_python>last_retrieval:
+                
+                # Find the last occurrence of <im_start>python in the context
+                last_tool_index = context.rfind("<|im_start|>python")
+                result_index = context.rfind("<|im_start|>result")
+                
+                # Extract the code to run from context (between <im_start>python and <im_start>result)
+                code_to_run = context[last_tool_index + len("<|im_start|>python"):result_index]
+                code_to_run = remove_python_prefix(code_to_run)
+                
+                # Execute the code using the python_interpreter function and get the result
+                tool_start = time.time()
+                
+                new_code = None
+                try:
+                    new_code,execution_result = python_interpreter(code_to_run)
+                except Exception as e:
+                    import traceback
+                    print(f"[ERROR] Exception for question:\n{question}\n")
+                    traceback.print_exc()
+                
+                tool_duration = time.time() - tool_start
+                print(f"[Time] Python tool call took {tool_duration:.2f} seconds")
+                
+                if new_code is not None:
+                    context = context[:last_tool_index]+new_code+'\n<|im_start|>result\n'+execution_result+"\n<|im_start|>continue\n"
+                else:
+                    context = context[:last_tool_index]+'\n<|im_start|>result\n'+"\n<|im_start|>continue\n"
+                
+                tool_use = True
+            else:
+            
+                # Find the last occurrence of <im_start>python in the context
+                last_tool_index = context.rfind("<|im_start|>retrieval")
+                result_index = context.rfind("<|im_start|>result")
+                
+                # Extract the code to run from context (between <im_start>python and <im_start>result)
+                query = context[last_tool_index + len("<|im_start|>retrieval\n"):result_index]
+                # Execute the code using the python_interpreter function and get the result
+                tool_start = time.time()
+                
+                execution_result = None
+                try:
+                    print(f"Query for google retrieval: '{query}'")
+                    execution_result = google_retriever(query)
+                except Exception as e:
+                    import traceback
+                    print(f"[ERROR] Exception for question:\n{question}\n")
+                    traceback.print_exc()
+                    
+                tool_duration = time.time() - tool_start
+                print(f"[Time] Retrieval tool call took {tool_duration:.2f} seconds")
+                # Insert the execution result right after the <im_start>result token in the context
+                insertion_point = result_index + len("<|im_start|>result\n")
+                if execution_result is not None:
+                    context = context[:insertion_point] + execution_result.response + "\n<|im_start|>continue\n"
+                else:
+                    context = context[:insertion_point] + "\n<|im_start|>continue\n"
+                    
+                tool_use = True
+
+        total_duration = time.time() - start_total_time
+        print(f"[Time] Total processing time: {total_duration:.2f} seconds")
+        print(f"[INFO] Generated {args.max_completion_length - tokens_left} tokens")
+        
+        return return_ids[0], tool_use
+    
+    
+    question = input_argument['question']
+    args = input_argument['args']
+    try:
+        return _generate_with_tool(question, args)
+    except Exception as e:
+        import traceback
+        print(f"[ERROR] Exception for question:\n{question}\n")
+        traceback.print_exc()
+        return f"[ERROR] {str(e)}", False
 
 
 class RepeatSampler(Sampler):
@@ -414,6 +626,9 @@ class GRPOTrainer(Trainer):
         if processing_class.pad_token is None:
             processing_class.pad_token = processing_class.eos_token
 
+        # allow tokenizer recreation in subprocesses
+        args.model_name_or_path = model.config._name_or_path
+        
         # Reward functions
         if not isinstance(reward_funcs, list):
             reward_funcs = [reward_funcs]
@@ -662,6 +877,12 @@ class GRPOTrainer(Trainer):
                     # Feed identical seed for tp groups to ensure sampling results are the same across workers
                     seed=self.accelerator.process_index // self.vllm_tensor_parallel_size,
                 )
+
+
+                self.args = args
+                # args.vllm_server_host, args.vllm_server_port, args.vllm_server_timeout
+                # 0.0.0.0 8000 120.0
+                
 
             # vLLM specific sampling arguments
             self.guided_decoding_regex = args.vllm_guided_decoding_regex
@@ -988,6 +1209,32 @@ class GRPOTrainer(Trainer):
             inputs = self._generate_and_score_completions(accumulated_local_batch)
         return inputs
 
+    def _generate_with_tool_batch_parallel(self, questions: list, max_processes: int = 20) -> list:
+        """
+        Batch inference - Parallel version using multiprocessing.
+        Maintains a pool of `max_processes` workers and processes questions as workers free up.
+        """
+        bar = tqdm(total=len(questions))
+        results = []
+        num_tool_use = 0
+        
+        input_arguments = [
+            {
+                "question": questions[i],
+                "args": self.args
+            } for i in range(len(questions))
+        ]
+        
+        with multiprocessing.Pool(processes=max_processes) as pool:
+            for result, tool_use in pool.imap(_generate_with_tool_safe, input_arguments):
+                # results.append(result)
+                if tool_use:
+                    num_tool_use += 1
+                results.append(result)
+                bar.update(1)
+        return results, num_tool_use
+
+
     def _generate_and_score_completions(
         self, inputs: list[dict[str, Union[torch.Tensor, Any]]]
     ) -> dict[str, Union[torch.Tensor, Any]]:
@@ -1005,7 +1252,8 @@ class GRPOTrainer(Trainer):
         if self.max_prompt_length is not None:
             prompt_ids = prompt_ids[:, -self.max_prompt_length :]
             prompt_mask = prompt_mask[:, -self.max_prompt_length :]
-
+        
+        # import IPython; IPython.embed()
         # Generate completions using either vLLM or regular generation
         if self.use_vllm:
             # First, update the vLLM weights if needed
@@ -1081,12 +1329,47 @@ class GRPOTrainer(Trainer):
                     tp_slice = slice(local_rank_in_group * orig_size, (local_rank_in_group + 1) * orig_size)
                     completion_ids = completion_ids[tp_slice]
 
+#             all_prompts_text = gather_object(prompts_text)
+#             if self.accelerator.is_main_process:
+#                 # Since 'prompts' contains 'num_generations' duplicates, we first take unique prompts, and generate
+#                 # num_generations outputs for each one. This is faster than generating outputs for each duplicate
+#                 # prompt individually.
+#                 # this is disabled in tool calling
+#                 # ordered_set_of_prompts = all_prompts_text[:: self.num_generations]
+#                 with profiling_context(self, "vLLM.generate"):
+#                     # TODO: change to tools inference
+#                     completion_ids, num_tool_use = self._generate_with_tool_batch_parallel(all_prompts_text, 20)
+#                     # completion_ids = self.vllm_client.generate(
+#                     #     prompts=ordered_set_of_prompts,
+#                     #     n=self.num_generations,
+#                     #     repetition_penalty=self.repetition_penalty,
+#                     #     temperature=self.temperature,
+#                     #     top_p=self.top_p,
+#                     #     top_k=-1 if self.top_k is None else self.top_k,
+#                     #     min_p=0.0 if self.min_p is None else self.min_p,
+#                     #     max_tokens=self.max_completion_length,
+#                     #     guided_decoding_regex=self.guided_decoding_regex,
+#                     # )
+#             else:
+#                 completion_ids = [None] * len(all_prompts_text)
+#             # Broadcast the completions from the main process to all processes, ensuring each process receives its
+#             # corresponding slice.
+#             completion_ids = broadcast_object_list(completion_ids, from_process=0)
+#             process_slice = slice(
+#                 self.accelerator.process_index * len(prompts),
+#                 (self.accelerator.process_index + 1) * len(prompts),
+#             )
+#             completion_ids = completion_ids[process_slice]
+
+
             # Pad the completions, and concatenate them with the prompts
             completion_ids = [torch.tensor(ids, device=device) for ids in completion_ids]
             completion_ids = pad(completion_ids, padding_value=self.processing_class.pad_token_id)
+            print(prompt_ids.shape, completion_ids.shape)
             prompt_completion_ids = torch.cat([prompt_ids, completion_ids], dim=1)
         else:
             # Regular generation path
+            # TODO: change to tools inference
             with unwrap_model_for_generation(
                 self.model_wrapped, self.accelerator, gather_deepspeed3_params=self.args.ds3_gather_for_generation
             ) as unwrapped_model:

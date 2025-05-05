@@ -12,7 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+
 import argparse
+import asyncio
+import ctypes
 import logging
 import os
 from collections.abc import Sequence
@@ -21,7 +24,7 @@ from dataclasses import dataclass, field
 from itertools import chain
 from multiprocessing import Pipe, Process
 from multiprocessing.connection import Connection
-from typing import Optional
+from typing import Optional, Sequence, Optional, Union, List
 
 import torch
 
@@ -36,7 +39,8 @@ from trl.import_utils import (
 
 
 if is_fastapi_available():
-    from fastapi import FastAPI
+    from fastapi import BackgroundTasks, FastAPI
+    from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 
 if is_pydantic_available():
@@ -46,17 +50,21 @@ if is_pydantic_available():
 if is_uvicorn_available():
     import uvicorn
 
-
 if is_vllm_available():
-    from vllm import LLM, SamplingParams
+    from vllm import LLM, SamplingParams, AsyncEngineArgs, AsyncLLMEngine
     from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
     from vllm.distributed.parallel_state import get_world_group
     from vllm.distributed.utils import StatelessProcessGroup
     from vllm.sampling_params import GuidedDecodingParams
     from vllm.utils import get_open_port
-
     if is_vllm_ascend_available():
         from vllm_ascend.distributed.device_communicators.pyhccl import PyHcclCommunicator as PyNcclCommunicator
+    from vllm.worker.worker import Worker
+    from vllm.usage.usage_lib import UsageContext
+    from vllm.utils import FlexibleArgumentParser, random_uuid, set_ulimit
+    import vllm.envs as envs
+else:
+    Worker = object
 
 
 logger = logging.getLogger(__name__)
@@ -373,6 +381,36 @@ def main(script_args: ScriptArguments):
                 process.terminate()
                 process.join()  # ensure process termination after calling terminate()
 
+    
+    engine_args = AsyncEngineArgs()
+    engine_args.model = script_args.model
+    engine_args.revision = script_args.revision
+    engine_args.tensor_parallel_size = script_args.tensor_parallel_size
+    engine_args.gpu_memory_utilization = script_args.gpu_memory_utilization
+    engine_args.dtype = script_args.dtype
+    # Automatic Prefix Caching caches the KV cache of existing queries, so that a new query can
+    # directly reuse the KV cache if it shares the same prefix with one of the existing queries.
+    # This is particularly useful here because we generate completions from the same prompts.
+    engine_args.enable_prefix_caching = script_args.enable_prefix_caching
+    engine_args.max_model_len = script_args.max_model_len
+    engine_args.worker_extension_cls = 'trl.scripts.vllm_serve.WeightSyncWorkerExtension'
+    engine_args.disable_log_stats = False
+        
+    envs.VLLM_USE_V1 = True
+    vllm_config = engine_args.create_engine_config(usage_context=UsageContext.API_SERVER)
+    
+    if envs.VLLM_USE_V1:
+        from vllm.v1.engine.async_llm import AsyncLLM as V1AsyncLLMEngine
+        async_engine_cls = V1AsyncLLMEngine
+
+    llm = async_engine_cls.from_vllm_config(
+        vllm_config=vllm_config,
+        start_engine_loop=True,
+        usage_context=UsageContext.API_SERVER,
+        stat_loggers=None,
+        disable_log_stats=engine_args.disable_log_stats,
+        disable_log_requests=engine_args.disable_log_requests,
+    )
     app = FastAPI(lifespan=lifespan)
 
     # Define the endpoints for the model server
@@ -397,10 +435,12 @@ def main(script_args: ScriptArguments):
         {"world_size": 8}
         ```
         """
+
         return {"world_size": script_args.tensor_parallel_size * script_args.data_parallel_size}
+#         return {"tensor_parallel_size": llm.processor.vllm_config.parallel_config.tensor_parallel_size}
 
     class GenerateRequest(BaseModel):
-        prompts: list[str]
+        prompt: str
         n: int = 1
         repetition_penalty: float = 1.0
         temperature: float = 1.0
@@ -409,9 +449,11 @@ def main(script_args: ScriptArguments):
         min_p: float = 0.0
         max_tokens: int = 16
         guided_decoding_regex: Optional[str] = None
+        stop: Optional[Union[str, List[str]]] = None
 
     class GenerateResponse(BaseModel):
         completion_ids: list[list[int]]
+        completion_text: list[str]
 
     @app.post("/generate/", response_model=GenerateResponse)
     async def generate(request: GenerateRequest):
@@ -453,7 +495,15 @@ def main(script_args: ScriptArguments):
             min_p=request.min_p,
             max_tokens=request.max_tokens,
             guided_decoding=guided_decoding,
+            stop=request.stop,
         )
+        request_id = random_uuid()        
+        results_generator = llm.generate(
+            prompt=request.prompt,
+            sampling_params=sampling_params,
+            request_id=request_id,
+        )
+
         # Evenly distribute prompts across DP ranks
         chunked_prompts = chunk_list(request.prompts, script_args.data_parallel_size)
 
@@ -477,6 +527,23 @@ def main(script_args: ScriptArguments):
         all_outputs = list(chain.from_iterable(all_outputs))  # from list of list to single list
         completion_ids = [list(output.token_ids) for outputs in all_outputs for output in outputs.outputs]
         return {"completion_ids": completion_ids}
+            
+#         # Non-streaming case
+#         final_output = None
+#         try:
+#             async for request_output in results_generator:
+#                 # if await request.is_disconnected():
+#                     # Abort the request if the client disconnects.
+#                     # await llm.abort(request_id)
+#                     # Return or raise an error
+#                 final_output = request_output
+#         except asyncio.CancelledError:
+#             return Response(status_code=499)
+        
+#         completion_ids = [final_output.outputs[0].token_ids]
+#         completion_text = [final_output.outputs[0].text]
+#         return {"completion_ids": completion_ids, "completion_text": completion_text}
+
 
     class InitCommunicatorRequest(BaseModel):
         host: str
@@ -495,6 +562,7 @@ def main(script_args: ScriptArguments):
                 - `port` (`int`): Port number to be used for communication.
                 - `world_size` (`int`): Total number of participating processes in the group.
         """
+
         world_size = script_args.tensor_parallel_size * script_args.data_parallel_size + 1
 
         # The function init_communicator is called this way: init_communicator(host, port, world_size)
@@ -503,6 +571,13 @@ def main(script_args: ScriptArguments):
         kwargs = {"method": "init_communicator", "args": (request.host, request.port, world_size)}
         for connection in connections:
             connection.send({"type": "fire_and_forget", "method": "collective_rpc", "kwargs": kwargs})
+
+
+#         background_tasks.add_task(
+#             llm.engine_core.collective_rpc_async,
+#             "init_communicator",
+#             args=(request.host, request.port, script_args.tensor_parallel_size + 1),
+#         )
 
         return {"message": "Request received, initializing communicator"}
 
@@ -529,9 +604,13 @@ def main(script_args: ScriptArguments):
         # So with collective_rpc we need to call it this way:
         # llm.collective_rpc("update_named_param", args=("name", torch.float32, (10, 10)))
         dtype = torch.__getattribute__(request.dtype.split(".")[-1])
+
         kwargs = {"method": "update_named_param", "args": (request.name, dtype, tuple(request.shape))}
         for connection in connections:
             connection.send({"type": "fire_and_forget", "method": "collective_rpc", "kwargs": kwargs})
+
+#         background_tasks.add_task(llm.engine_core.collective_rpc_async, "update_named_param", args=(request.name, dtype, request.shape))
+
 
         return {"message": "Request received, updating named parameter"}
 
@@ -540,11 +619,15 @@ def main(script_args: ScriptArguments):
         """
         Resets the prefix cache for the model.
         """
+
         for connection in connections:
             connection.send({"type": "call", "method": "reset_prefix_cache"})
         # Wait for and collect all results
         all_outputs = [connection.recv() for connection in connections]
         success = all(output for output in all_outputs)
+
+#         success = await llm.engine_core.reset_prefix_cache_async()
+
         return {"message": "Request received, resetting prefix cache status: " + str(success)}
 
     @app.post("/close_communicator/")
@@ -552,6 +635,7 @@ def main(script_args: ScriptArguments):
         """
         Closes the weight update group and cleans up associated resources.
         """
+
         kwargs = {"method": "close_communicator"}
         for connection in connections:
             connection.send({"type": "fire_and_forget", "method": "collective_rpc", "kwargs": kwargs})
@@ -559,6 +643,9 @@ def main(script_args: ScriptArguments):
 
     # Start the server
     uvicorn.run(app, host=script_args.host, port=script_args.port, log_level=script_args.log_level)
+#         await llm.engine_core.collective_rpc_async("close_communicator")
+#         return {"message": "Request received, closing communicator"}
+
 
 
 def make_parser(subparsers: argparse._SubParsersAction = None):
