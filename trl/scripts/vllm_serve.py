@@ -532,6 +532,8 @@ def main(script_args: ScriptArguments):
         # 1 prompt in each request, tool-use case
         else:
             kwargs = {"prompts": request.prompts, "sampling_params": sampling_params, "request_id": request_id}
+            connection = connections[connection_to_send]
+            connection_to_send = (connection_to_send + 1) % script_args.data_parallel_size
             connection.send({"type": "call", "method": "generate", "kwargs": kwargs})
             
             final_output = connection.recv()

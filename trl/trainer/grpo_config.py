@@ -185,6 +185,12 @@ class GRPOConfig(TrainingArguments):
         wandb_log_unique_prompts (`bool`, *optional*, defaults to `False`):
             Whether to log unique prompts in wandb. If `True`, only unique prompts are logged. If `False`, all
             prompts are logged.
+            
+        > Parameters that control tool use
+        
+        tool_use (`bool`, *optional*, defaults to `False`):
+            Whether to include tool use in grpo training.
+        
     """
 
     if version.parse(transformers.__version__) <= version.parse("4.50.3"):
@@ -464,3 +470,12 @@ class GRPOConfig(TrainingArguments):
             "all prompts are logged."
         },
     )
+
+    # Parameters that control tool use
+    tool_use: bool = field(
+        default=False,
+        metadata={
+            "help": "Whether to include tool use in grpo training."
+        },
+    )
+    
