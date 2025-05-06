@@ -691,6 +691,7 @@ class GRPOTrainer(Trainer):
         self.repetition_penalty = args.repetition_penalty
         self.use_vllm = args.use_vllm
         self.vllm_mode = args.vllm_mode
+        self.tool_use = args.tool_use
         self.vllm_gpu_memory_utilization = args.vllm_gpu_memory_utilization  # only applies to colocation mode
         self.vllm_tensor_parallel_size = args.vllm_tensor_parallel_size  # only applies to colocation mode
         self.use_liger_loss = args.use_liger_loss
@@ -1253,7 +1254,6 @@ class GRPOTrainer(Trainer):
             prompt_ids = prompt_ids[:, -self.max_prompt_length :]
             prompt_mask = prompt_mask[:, -self.max_prompt_length :]
         
-        # import IPython; IPython.embed()
         # Generate completions using either vLLM or regular generation
         if self.use_vllm:
             # First, update the vLLM weights if needed
@@ -1265,22 +1265,30 @@ class GRPOTrainer(Trainer):
             if self.vllm_mode == "server":
                 all_prompts_text = gather_object(prompts_text)
                 if self.accelerator.is_main_process:
-                    # Since 'prompts' contains 'num_generations' duplicates, we first take unique prompts, and generate
-                    # num_generations outputs for each one. This is faster than generating outputs for each duplicate
-                    # prompt individually.
-                    ordered_set_of_prompts = all_prompts_text[:: self.num_generations]
-                    with profiling_context(self, "vLLM.generate"):
-                        completion_ids = self.vllm_client.generate(
-                            prompts=ordered_set_of_prompts,
-                            n=self.num_generations,
-                            repetition_penalty=self.repetition_penalty,
-                            temperature=self.temperature,
-                            top_p=self.top_p,
-                            top_k=-1 if self.top_k is None else self.top_k,
-                            min_p=0.0 if self.min_p is None else self.min_p,
-                            max_tokens=self.max_completion_length,
-                            guided_decoding_regex=self.guided_decoding_regex,
-                        )
+                    if not self.tool_use:
+                        # Since 'prompts' contains 'num_generations' duplicates, we first take unique prompts, and generate
+                        # num_generations outputs for each one. This is faster than generating outputs for each duplicate
+                        # prompt individually.
+                        ordered_set_of_prompts = all_prompts_text[:: self.num_generations]
+                        with profiling_context(self, "vLLM.generate"):
+                            completion_ids = self.vllm_client.generate(
+                                prompts=ordered_set_of_prompts,
+                                n=self.num_generations,
+                                repetition_penalty=self.repetition_penalty,
+                                temperature=self.temperature,
+                                top_p=self.top_p,
+                                top_k=-1 if self.top_k is None else self.top_k,
+                                min_p=0.0 if self.min_p is None else self.min_p,
+                                max_tokens=self.max_completion_length,
+                                guided_decoding_regex=self.guided_decoding_regex,
+                            )
+                    else:
+                        all_prompts_text = gather_object(prompts_text)
+                        if self.accelerator.is_main_process:
+                            with profiling_context(self, "vLLM.generate"):
+                                completion_ids, num_tool_use = self._generate_with_tool_batch_parallel(all_prompts_text, 20)
+                    
+                    
                 else:
                     completion_ids = [None] * len(all_prompts_text)
                 # Broadcast the completions from the main process to all processes, ensuring each process receives its
@@ -1329,38 +1337,6 @@ class GRPOTrainer(Trainer):
                     tp_slice = slice(local_rank_in_group * orig_size, (local_rank_in_group + 1) * orig_size)
                     completion_ids = completion_ids[tp_slice]
 
-#             all_prompts_text = gather_object(prompts_text)
-#             if self.accelerator.is_main_process:
-#                 # Since 'prompts' contains 'num_generations' duplicates, we first take unique prompts, and generate
-#                 # num_generations outputs for each one. This is faster than generating outputs for each duplicate
-#                 # prompt individually.
-#                 # this is disabled in tool calling
-#                 # ordered_set_of_prompts = all_prompts_text[:: self.num_generations]
-#                 with profiling_context(self, "vLLM.generate"):
-#                     # TODO: change to tools inference
-#                     completion_ids, num_tool_use = self._generate_with_tool_batch_parallel(all_prompts_text, 20)
-#                     # completion_ids = self.vllm_client.generate(
-#                     #     prompts=ordered_set_of_prompts,
-#                     #     n=self.num_generations,
-#                     #     repetition_penalty=self.repetition_penalty,
-#                     #     temperature=self.temperature,
-#                     #     top_p=self.top_p,
-#                     #     top_k=-1 if self.top_k is None else self.top_k,
-#                     #     min_p=0.0 if self.min_p is None else self.min_p,
-#                     #     max_tokens=self.max_completion_length,
-#                     #     guided_decoding_regex=self.guided_decoding_regex,
-#                     # )
-#             else:
-#                 completion_ids = [None] * len(all_prompts_text)
-#             # Broadcast the completions from the main process to all processes, ensuring each process receives its
-#             # corresponding slice.
-#             completion_ids = broadcast_object_list(completion_ids, from_process=0)
-#             process_slice = slice(
-#                 self.accelerator.process_index * len(prompts),
-#                 (self.accelerator.process_index + 1) * len(prompts),
-#             )
-#             completion_ids = completion_ids[process_slice]
-
 
             # Pad the completions, and concatenate them with the prompts
             completion_ids = [torch.tensor(ids, device=device) for ids in completion_ids]
@@ -1369,7 +1345,8 @@ class GRPOTrainer(Trainer):
             prompt_completion_ids = torch.cat([prompt_ids, completion_ids], dim=1)
         else:
             # Regular generation path
-            # TODO: change to tools inference
+            # TODO: support tools inference for non-vllm case
+            assert self.tool_use is False, "Tool use is not supported in non-vLLM mode"
             with unwrap_model_for_generation(
                 self.model_wrapped, self.accelerator, gather_deepspeed3_params=self.args.ds3_gather_for_generation
             ) as unwrapped_model:
