@@ -63,6 +63,7 @@ if is_vllm_available():
     from vllm.usage.usage_lib import UsageContext
     from vllm.utils import FlexibleArgumentParser, random_uuid, set_ulimit
     import vllm.envs as envs
+    from vllm.outputs import RequestOutput
 else:
     Worker = object
 
@@ -266,9 +267,11 @@ class ScriptArguments:
             "'trace'."
         },
     )
+    
+def llm_worker(*args):
+    asyncio.run(async_llm_worker(*args))
 
-
-def llm_worker(
+async def async_llm_worker(
     script_args: ScriptArguments, data_parallel_rank: int, master_port: int, connection: Connection
 ) -> None:
     # Set required environment variables for DP to work with vLLM
@@ -325,21 +328,40 @@ def llm_worker(
 
     # Send ready signal to parent process
     connection.send({"status": "ready"})
+    
+    def get_nested_attr(obj, attr_path):
+        for attr in attr_path.split("."):
+            obj = getattr(obj, attr)
+        return obj
+
 
     while True:
         # Wait for commands from the parent process
         try:
             command = connection.recv()
         except KeyboardInterrupt:
-            llm.engine_core.collective_rpc(method="close_communicator")
+            llm.engine_core.collective_rpc_async(method="close_communicator")
             break
 
         # Handle commands
         if command["type"] in ["call", "fire_and_forget"]:
             method_name = command["method"]
             args, kwargs = command.get("args", ()), command.get("kwargs", {})
-            method = getattr(llm, method_name)
-            result = method(*args, **kwargs)
+
+            method = get_nested_attr(llm, method_name)
+
+            if method == llm.generate:
+                results_generator = method(*args, **kwargs)
+                result = []
+                try:
+                    async for request_output in results_generator:
+                        result.append(request_output)
+                except asyncio.CancelledError:
+                    return Response(status_code=499)
+                
+            else:
+                result = await method(*args, **kwargs)
+            
             if command["type"] == "call":
                 connection.send(result)
         elif command["type"] == "shutdown":
@@ -457,7 +479,7 @@ def main(script_args: ScriptArguments):
 
     class GenerateResponse(BaseModel):
         completion_ids: list[list[int]]
-        completion_text: list[str]
+        # completion_text: list[str]
 
     @app.post("/generate/", response_model=GenerateResponse)
     async def generate(request: GenerateRequest):
@@ -515,8 +537,11 @@ def main(script_args: ScriptArguments):
                 # with vLLM's requirement, and we later ignore the result.
                 if not prompts:
                     prompts = ["<placeholder>"]
-                kwargs = {"prompts": prompts, "sampling_params": sampling_params}
-                connection.send({"type": "call", "method": "generate", "kwargs": kwargs})
+                    
+                for prompt in prompts:
+                    kwargs = {"prompt": prompt, "sampling_params": sampling_params}
+                    connection.send({"type": "call", "method": "generate", "kwargs": kwargs})
+
 
             # Receive results
             all_outputs = [connection.recv() for connection in connections]
@@ -531,17 +556,23 @@ def main(script_args: ScriptArguments):
         
         # 1 prompt in each request, tool-use case
         else:
-            kwargs = {"prompts": request.prompts, "sampling_params": sampling_params, "request_id": request_id}
+            kwargs = {"prompt": request.prompts[0], "sampling_params": sampling_params, "request_id": request_id}
+            nonlocal connection_to_send
             connection = connections[connection_to_send]
             connection_to_send = (connection_to_send + 1) % script_args.data_parallel_size
             connection.send({"type": "call", "method": "generate", "kwargs": kwargs})
             
-            final_output = connection.recv()
-            
-            completion_ids = [final_output.outputs[0].token_ids]
-            completion_text = [final_output.outputs[0].text]
-            return {"completion_ids": completion_ids, "completion_text": completion_text}
+            print("sending connection!", kwargs)
+            # all_outputs: List[RequestOutput] = connection.recv()
 
+            all_outputs = connection.recv()
+            completion_ids = [list(output.token_ids) for outputs in all_outputs for output in outputs.outputs]
+            completion_text = [list(output.text) for outputs in all_outputs for output in outputs.outputs]
+
+            # completion_ids = [final_output.outputs[0].token_ids]
+            # completion_text = [final_output.outputs[0].text]
+            # return {"completion_ids": completion_ids, "completion_text": completion_text}
+            return {"completion_ids": completion_ids}
 
     class InitCommunicatorRequest(BaseModel):
         host: str
@@ -568,7 +599,7 @@ def main(script_args: ScriptArguments):
         # llm.collective_rpc(method="init_communicator", args=(host, port, world_size))
         kwargs = {"method": "init_communicator", "args": (request.host, request.port, world_size)}
         for connection in connections:
-            connection.send({"type": "fire_and_forget", "method": "engine_core.collective_rpc", "kwargs": kwargs})
+            connection.send({"type": "fire_and_forget", "method": "engine_core.collective_rpc_async", "kwargs": kwargs})
 
 
 #         background_tasks.add_task(
@@ -605,7 +636,7 @@ def main(script_args: ScriptArguments):
 
         kwargs = {"method": "update_named_param", "args": (request.name, dtype, tuple(request.shape))}
         for connection in connections:
-            connection.send({"type": "fire_and_forget", "method": "engine_core.collective_rpc", "kwargs": kwargs})
+            connection.send({"type": "fire_and_forget", "method": "engine_core.collective_rpc_async", "kwargs": kwargs})
 
 #         background_tasks.add_task(llm.engine_core.collective_rpc_async, "update_named_param", args=(request.name, dtype, request.shape))
 
@@ -619,7 +650,7 @@ def main(script_args: ScriptArguments):
         """
 
         for connection in connections:
-            connection.send({"type": "call", "method": "reset_prefix_cache"})
+            connection.send({"type": "call", "method": "engine_core.reset_prefix_cache_async"})
         # Wait for and collect all results
         all_outputs = [connection.recv() for connection in connections]
         success = all(output for output in all_outputs)
@@ -636,7 +667,7 @@ def main(script_args: ScriptArguments):
 
         kwargs = {"method": "close_communicator"}
         for connection in connections:
-            connection.send({"type": "fire_and_forget", "method": "engine_core.collective_rpc", "kwargs": kwargs})
+            connection.send({"type": "fire_and_forget", "method": "engine_core.collective_rpc_async", "kwargs": kwargs})
         return {"message": "Request received, closing communicator"}
 
     # Start the server
