@@ -502,8 +502,8 @@ class GRPOConfig(TrainingArguments):
         },
     )
     
-    saving_token: str = field(
-        default="<save>",
+    saving_tokens: list[str] = field(
+        default=["<save>", "</save>"],
         metadata={
             "help": "Saving token to be detected during tool inference. If detected, "
             "will call saving and replace the thinking trajectory with summarization"
@@ -522,6 +522,22 @@ class GRPOConfig(TrainingArguments):
         default="<continue>",
         metadata={
             "help": "Continue token for tool inference. Model will resume thinking after this token. "
+        },
+    )
+    
+    assistant_token: str = field(
+        default="<｜Assistant｜>",
+        metadata={
+            "help": "Assistant token to be detected during tool inference. If detected, "
+            "will append tool use results after the assistant token"
+        },
+    )
+    
+    thinking_tokens: list[str] = field(
+        default=["<think>", "</think>"],
+        metadata={
+            "help": "Thinking token to be detected during tool inference. If detected, "
+            "will append tool use results after the thinking token"
         },
     )
     
