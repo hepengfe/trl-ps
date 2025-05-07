@@ -479,3 +479,63 @@ class GRPOConfig(TrainingArguments):
         },
     )
     
+    saving: bool = field(
+        default=False,
+        metadata={
+            "help": "Use inftythink-type summarization in CoT infernence."
+        },
+    )
+    
+    python_token: str = field(
+        default="<python>",
+        metadata={
+            "help": "Python interpreter token to be detected during tool inference. If detected, "
+            "will call python interpreter and append results back into the thinking trajectory"
+        },
+    )
+    
+    retrieval_token: str = field(
+        default="<retrieval>",
+        metadata={
+            "help": "Retrieval token to be detected during tool inference. If detected, "
+            "will call google retrieval and append results back into the thinking trajectory"
+        },
+    )
+    
+    saving_token: str = field(
+        default="<save>",
+        metadata={
+            "help": "Saving token to be detected during tool inference. If detected, "
+            "will call saving and replace the thinking trajectory with summarization"
+        },
+    )
+    
+    result_token: str = field(
+        default="<result>",
+        metadata={
+            "help": "Result token to be detected during tool inference. If detected, "
+            "will append tool use results after the result token"
+        },
+    )
+    
+    continue_token: str = field(
+        default="<continue>",
+        metadata={
+            "help": "Continue token for tool inference. Model will resume thinking after this token. "
+        },
+    )
+    
+    eos_token: str = field(
+        default="<｜end_of_sentence｜>",
+        metadata={
+            "help": "End of sentence token to be detected during tool inference. If detected, "
+            "will stop the thinking trajectory"
+        },
+    )
+    
+    max_num_savings: int = field(
+        default=3,
+        metadata={
+            "help": "Maximum number of summarization. Only keep the last summarization in thinking."
+        },
+    )

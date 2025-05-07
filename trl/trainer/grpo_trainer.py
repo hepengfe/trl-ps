@@ -85,15 +85,65 @@ if is_vllm_available():
 if is_wandb_available():
     import wandb
 
-SYSTEM_PROMPT = """<|im_start|>system\nYou are Qwen, created by Alibaba Cloud. You are a helpful assistant.
-You will also be an expert assistant using chain-of-thought thinking and tool calling to solve difficult problems.
-For tool calling, you may call an external retriever or python interpreter.
-Here's a more detailed instruction to for tool calling.
-- If at any stage of your thinking, you feel like the thinking will benefit from web retrieval for accurate sourcing, insert new token <|im_start|>retrieval immediately after that segment. Then, insert the question to ask for the web retrieval. Finally, insert <|im_start|>result\n after the question.
-- Similarly, if any stage of the thinking requires the use of a python interpreter, insert new token <|im_start|>python immediately after the formula that need to be calculated. Then, insert the latex formula that needs to be computed by the calculator. Finally, add <|im_start|>result\n.
-- The use of python interpreter can be for precise computation of formula, writing code for debugging/experiment/plotting.
-- Only call python interpreter for computation if you think the computation is difficult or you are doing the computation wrong.
-<|im_end|>\n"""
+SYSTEM_PROMPT = """<｜begin_of_sentence｜>
+You are a helpful assistant. You are good at following instructions and using given tools.
+<｜User｜>
+
+Role Description:
+You are an intelligent assistant whose job is to solve problems using a rigorous, multi-step reasoning process. To guarantee both precision and factual accuracy, you are **required to use external tools**—specifically, the web retrieval tool and the Python interpreter—for every non-trivial computation or fact verification step. You must never perform such steps solely in plain text; instead, you must always use the exact tool call format provided below.
+
+Task Requirements:
+1. Comprehensive and Iterative Reasoning:
+- Conduct a full analysis including summarization, reassessment, and reflection.
+- **Force Tool Invocation:** For every non-trivial step (e.g., verifying facts, performing arithmetic, or confirming data), immediately and mandatorily use the corresponding tool call using the formats given below. Do not simply describe the process in text—insert a tool invocation using the specified syntax.
+
+2. Mandated Tool Usage (No Exceptions):
+- **Web Retrieval Tool:**
+When you need to verify any factual information or retrieve current data, you MUST insert the following command immediately at the point of need:
+
+<retrieval>
+{query}
+<result>
+
+
+- **Python Interpreter Tool:**
+For any calculations, code debugging, or intermediate quantitative validations, you MUST insert a single, concise code snippet using the format below:
+
+<python>
+{code}
+<result>
+
+
+**Important Guidelines:**
+- Every time you perform a non-trivial calculation or need to verify a fact, you must call the appropriate tool using the exact syntax provided. No calculation or verification step should be described purely in plain text.
+- Do not duplicate the tool call; only one invocation per verification step is allowed.
+- All tool invocations must strictly follow these formats—any deviation is not permitted.
+
+3. Building on Partial Answers:
+- If a partial answer or previous reasoning is provided, continue from that content. Do not start from scratch; integrate additional tool calls as needed to complete and refine the solution.
+
+4. Final Answer Format:
+- End your response with the final answer using the precise format below:
+
+
+**Final Answer**
+
+
+\\boxed{Your Answer}
+
+
+- The final answer must be enclosed within LaTeX using `\\boxed{}` immediately after the **Final Answer** header.
+
+Key Reminder:
+From now on, **every** non-trivial computation, fact verification, or any step requiring external validation must be performed using the designated tool calls in the exact format provided. This approach is mandatory for ensuring that your entire chain-of-thought, including intermediate conclusions, is fully backed by executable computations and reliable external references.
+
+Respond in the following format:
+<think>
+reasoning process here
+</think>
+answer here
+
+Now, here is the question:\n"""
 
 
 # What we call a reward function is a callable that takes a list of prompts and completions and returns a list of
@@ -101,7 +151,7 @@ Here's a more detailed instruction to for tool calling.
 RewardFunc = Union[str, PreTrainedModel, Callable[[list, list], list[float]]]
 
 
-def _make_generate_requests(
+def _make_tool_inference_requests(
     prompt: str,
     max_tokens: int,
     args: trl.GRPOConfig,
@@ -129,13 +179,39 @@ def _make_generate_requests(
     else:
         raise Exception(f"Request failed: {response.status_code}, {response.text}")
 
+def _summarize_reasoning(self, cot: str) -> str:
+    """Return a <save>…</save> block that compresses everything *before* <think>."""
+    
+    self.think_summary_min_tokens = 20
+    self.think_summary_max_tokens = 256
+    
+    # Quick short‑circuit: if body already tiny just return empty save block
+    if len(cot) < self.think_summary_min_tokens:
+        return "<save>\n</save>\n"  # empty placeholder – no change
+
+    summary_prompt = (
+        "Summarize the following reasoning trace in at most "
+        f"{self.think_summary_max_tokens} words.\n\n### Here's the reasoning trace:\n\n" + cot + "\n\n### Summary:"  # few‑shot style stop
+    )
+    if self.args.use_vllm:
+        ids, _ = self.vllm_client.generate(
+            prompts=[summary_prompt], n=1, max_tokens=self.think_summary_max_tokens,
+            temperature=0.0, top_p=0.95, top_k=-1, repetition_penalty=1.0,
+        )[0]
+        summary = self.processing_class.decode(ids, skip_special_tokens=True).strip()
+    else:
+        toks = self.processing_class(summary_prompt, return_tensors="pt").to(device)
+        ids = self.model.generate(**toks, max_new_tokens=self.think_summary_max_tokens, temperature=0.0)
+        summary = self.processing_class.decode(ids[0], skip_special_tokens=True).strip()
+    return f"<save>\n{summary}\n</save>\n"
 
 def _generate_with_tool_safe(input_argument: dict) -> str:
     
     def _generate_with_tool(
-        question: str, args
+        question: str, args: GRPOConfig
     ) -> str:
         """
+        TODO: change this doc when format is finalized.
         Generates text from the LLM using vLLM in a streaming fashion.
         The generation monitors for trigger pairs:
         - A "<im_start>python" token followed by a "<im_start>result" token.
@@ -149,13 +225,14 @@ def _generate_with_tool_safe(input_argument: dict) -> str:
         Generation then resumes with the updated context.
         """        
         # Initialize the context
-        context = SYSTEM_PROMPT + "<|im_start|>user\n" + question + "\n<|im_end|>\n<|im_start|>assistant\n<|im_start|>think\n"
+        context = SYSTEM_PROMPT + question + "\n<｜Assistant｜>\n<think>\n"
         
         tokens_left = args.max_completion_length
         prompt_idx = len(context)
         start_total_time = time.time()
         tool_use = False
         return_ids = None
+        num_savings = 0
         
         while True:
             gen_start = time.time()
@@ -166,11 +243,11 @@ def _generate_with_tool_safe(input_argument: dict) -> str:
             #     stop=['<|im_start|>result', '<|im_end|>'],
             #     temperature=0.0,
             # )
-            completion_ids, completion_text = _make_generate_requests(
+            completion_ids, completion_text = _make_tool_inference_requests(
                     prompt=context,
                     max_tokens=tokens_left,
                     args=args,
-                    stop=['<|im_start|>result', '<|im_end|>'],
+                    stop=[args.result_token, '<|im_end|>'],
                 )
             completion_ids, completion_text = completion_ids[0], completion_text[0]
             # tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path)
@@ -186,9 +263,9 @@ def _generate_with_tool_safe(input_argument: dict) -> str:
             # print("--------------------------------------------------------------\n\n")
             tokens_left -= len(completion_ids)
             # If the result token is present, process the code execution
-            last_python = context[prompt_idx:].rfind("<|im_start|>python")
-            last_retrieval = context[prompt_idx:].rfind("<|im_start|>retrieval")
-            last_result = context[prompt_idx:].rfind("<|im_start|>result")
+            last_python = context[prompt_idx:].rfind(args.python_token)
+            last_retrieval = context[prompt_idx:].rfind(args.retrieval_token)
+            last_result = context[prompt_idx:].rfind(args.result_token)
             print(f"[Info] last_python {last_python}, last_retrieval {last_retrieval}, last_result {last_result}")
             
             if last_result != -1:
@@ -203,7 +280,7 @@ def _generate_with_tool_safe(input_argument: dict) -> str:
                 #     stop=['<|im_end|>'],
                 #     temperature=0.0,
                 # )
-                return_ids, completion_text = _make_generate_requests(
+                return_ids, completion_text = _make_tool_inference_requests(
                     prompt=context,
                     max_tokens=512,
                     args=args,
@@ -884,6 +961,11 @@ class GRPOTrainer(Trainer):
                 # args.vllm_server_host, args.vllm_server_port, args.vllm_server_timeout
                 # 0.0.0.0 8000 120.0
                 
+                if args.saving:
+                    assert args.tool_use is True, "Saving is only supported with tool_use=True"
+                    global_batch_size = args.per_device_train_batch_size * num_processes
+                    self.global_batch_size = global_batch_size
+                
 
             # vLLM specific sampling arguments
             self.guided_decoding_regex = args.vllm_guided_decoding_regex
@@ -1235,7 +1317,6 @@ class GRPOTrainer(Trainer):
                 bar.update(1)
         return results, num_tool_use
 
-
     def _generate_and_score_completions(
         self, inputs: list[dict[str, Union[torch.Tensor, Any]]]
     ) -> dict[str, Union[torch.Tensor, Any]]:
@@ -1271,7 +1352,7 @@ class GRPOTrainer(Trainer):
                         # prompt individually.
                         ordered_set_of_prompts = all_prompts_text[:: self.num_generations]
                         with profiling_context(self, "vLLM.generate"):
-                            completion_ids = self.vllm_client.generate(
+                            completion_ids, _ = self.vllm_client.generate(
                                 prompts=ordered_set_of_prompts,
                                 n=self.num_generations,
                                 repetition_penalty=self.repetition_penalty,
