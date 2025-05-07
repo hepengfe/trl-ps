@@ -486,6 +486,18 @@ class GRPOConfig(TrainingArguments):
         },
     )
     
+    tool_format: str = field(
+        choice=["deepseek", "qwen"],
+        default="qwen",
+        metadata={
+            "help": "The format of the tool use. If set to `qwen`, the tool use will be in the format of "
+            "`<tool_call> JSON string </tool_call> <tool_response> RESPONSE </tool_response>`. "
+            "If set to `deepseek`, the tool use will be in the format of "
+            "`<python> <result> <continue> <|Assistant|> <|end_of_sentence|>`."
+        },
+    )
+        
+    
     python_token: str = field(
         default="<python>",
         metadata={
