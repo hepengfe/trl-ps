@@ -1,3 +1,4 @@
+import json
 import requests
 import time
 from tqdm import tqdm
@@ -35,19 +36,36 @@ Task Requirements:
 
 2. Mandated Tool Usage (No Exceptions):
 - **Web Retrieval Tool:**
+<tools>
+{"type":"function","function":{"name":"retrieval","description":"Used to verify factual information or retrieve up-to-date external content via a search engine. This tool ensures factual accuracy by accessing web-based data sources.","parameters":{"type":"object","properties":{"query":{"type":"string","description":"The search query or question to be retrieved from the web."}},"required":["query"]}}}
+</tools>
+
 When you need to verify any factual information or retrieve current data, you MUST insert the following command immediately at the point of need:
 
-<retrieval>
-{query}
-<result>
+<tool_call>
+{"name": "retrieval", "arguments": {"query": <replace_with_your_retrieval_query>}}
+</tool_call>
 
 
 - **Python Interpreter Tool:**
+<tools>
+{"type":"function","function":{"name":"python","description":"Used for performing calculations, debugging code, or validating intermediate results through Python execution. Ensures correctness for all non-trivial quantitative or logical steps.","parameters":{"type":"object","properties":{"code":{"type":"string","description":"A concise Python code snippet to execute. Must be self-contained and return the desired output."}},"required":["code"]}}}
+</tools>
+
 For any calculations, code debugging, or intermediate quantitative validations, you MUST insert a single, concise code snippet using the format below:
 
-<python>
-{code}
-<result>
+<tool_call>
+{"name": "python", "arguments": {"code": <replace_with_your_python_code>}}
+</tool_call>
+
+
+- **Thinking Summarization Tool:**
+For any calculations, code debugging, or intermediate quantitative validations, you MUST insert a single, concise code snippet using the format below:
+If the previous thinking is too lengthy, you MUST call Thinking Summarization Tool to replace previous thinking with summarization.
+
+<tool_call>
+{"name": "saving", "arguments": None}
+</tool_call>
 
 
 **Important Guidelines:**
@@ -81,7 +99,7 @@ answer here
 
 <|im_end|>
 <|im_start|>user
-Now, here is the question:\n"""
+"""
 
 def _make_tool_inference_requests(
     prompt: str,
@@ -111,32 +129,6 @@ def _make_tool_inference_requests(
     else:
         raise Exception(f"Request failed: {response.status_code}, {response.text}")
 
-# def _summarize_reasoning(self, cot: str) -> str:
-#     """Return a <save>…</save> block that compresses everything *before* <think>."""
-    
-#     self.think_summary_min_tokens = 20
-#     self.think_summary_max_tokens = 256
-    
-#     # Quick short‑circuit: if body already tiny just return empty save block
-#     if len(cot) < self.think_summary_min_tokens:
-#         return "<save>\n</save>\n"  # empty placeholder – no change
-
-#     summary_prompt = (
-#         "Summarize the following reasoning trace in at most "
-#         f"{self.think_summary_max_tokens} words.\n\n### Here's the reasoning trace:\n\n" + cot + "\n\n### Summary:"  # few‑shot style stop
-#     )
-#     if self.args.use_vllm:
-#         ids, _ = self.vllm_client.generate(
-#             prompts=[summary_prompt], n=1, max_tokens=self.think_summary_max_tokens,
-#             temperature=0.0, top_p=0.95, top_k=-1, repetition_penalty=1.0,
-#         )[0]
-#         summary = self.processing_class.decode(ids, skip_special_tokens=True).strip()
-#     else:
-#         toks = self.processing_class(summary_prompt, return_tensors="pt").to(device)
-#         ids = self.model.generate(**toks, max_new_tokens=self.think_summary_max_tokens, temperature=0.0)
-#         summary = self.processing_class.decode(ids[0], skip_special_tokens=True).strip()
-#     return f"<save>\n{summary}\n</save>\n"
-
 
 def _detect_tool_use(context: str, prompt_idx: int, tokens_left: int, args: GRPOConfig) -> dict:
     """
@@ -160,59 +152,45 @@ def _detect_tool_use(context: str, prompt_idx: int, tokens_left: int, args: GRPO
         "error_tool_use": False
     }
 
-    context_tail = context[prompt_idx:]
+    generated = context[prompt_idx:]
 
-    # Detect positions of special tokens
-    last_python = context_tail.rfind(args.python_token)
-    last_retrieval = context_tail.rfind(args.retrieval_token)
-    last_result = context_tail.rfind(args.result_token)
-    last_saving = context_tail.rfind(args.saving_tokens[0])
-
-    print(f"[Info] last_python {last_python}, last_retrieval {last_retrieval}, last_saving {last_saving}, last_result {last_result}")
-
-    if last_result == -1:
-        return result  # No tool use
-
-    result["tool_use"] = True
-
-    # Python tool use
-    if (last_python > last_retrieval) or (last_retrieval == -1 and last_python != -1):
-        tool_start = context_tail.rfind(args.python_token)
-        tool_end = context_tail.rfind(args.result_token)
-        if tool_start == -1 or tool_end == -1 or tool_start > tool_end:
-            result["error_tool_use"] = True
-        else:
-            code = context_tail[tool_start + len(args.python_token):tool_end].strip()
-            result["tool_type"] = "python"
-            result["tool_argument"] = code
-
-    # Retrieval tool use
-    elif last_retrieval > last_python:
-        tool_start = context_tail.rfind(args.retrieval_token)
-        tool_end = context_tail.rfind(args.result_token)
-        if tool_start == -1 or tool_end == -1 or tool_start > tool_end:
-            result["error_tool_use"] = True
-        else:
-            query = context_tail[tool_start + len(args.retrieval_token):tool_end].strip()
-            result["tool_type"] = "retrieval"
-            result["tool_argument"] = query
-
-    # Save tool use
-    elif last_saving != -1:
-        end_tag = "</save>"
-        start_tag = "<save>"
-        end_pos = context_tail.rfind(end_tag)
-        start_pos = context_tail.rfind(start_tag, 0, end_pos)
-        if start_pos == -1 or end_pos == -1 or start_pos > end_pos:
-            result["error_tool_use"] = True
-        else:
-            extracted = context_tail[start_pos + len(start_tag):end_pos].strip()
-            # Check if there's another `</save>` inside extracted region (error case)
-            if "</save>" in extracted:
-                result["error_tool_use"] = True
-            else:
-                result["tool_type"] = "saving"
-                result["tool_argument"] = (start_pos, end_pos + len(end_tag), extracted)
+    start_tag = "<tool_call>"
+    end_tag = "</tool_call>"
+    response_tag = "</tool_response>"
+    
+    # Find the last occurrence of tool calling
+    start = generated.rfind(start_tag)
+    end = generated.rfind(end_tag, start)
+    
+    # Find the last occurrence of tool result
+    last_response_idx = generated.rfind(response_tag, start)
+    
+    # no tool call detected
+    if start == -1:
+        return result
+    
+    # last tool call is processed
+    if start != -1 and last_response_idx != -1:
+        return result
+    
+    # TODO: tool call is not at the end of the generation, ignore?
+    
+    try:
+        tool_call_raw = generated[start + len(start_tag):end].strip()
+        parsed = json.loads(tool_call_raw)
+        result = {
+            "tool_use": True,
+            "tool_type": parsed["name"],
+            "tool_argument": parsed["arguments"],
+            "error_tool_use": True
+        }
+    except json.JSONDecodeError:
+        result = {
+            "tool_use": True,
+            "tool_type": None,
+            "tool_argument": None,
+            "error_tool_use": True
+        }
 
     return result
 
@@ -288,7 +266,7 @@ def _generate_with_tool_safe(input_argument: dict) -> str:
             tool_type = detect_result["tool_type"]
 
             if tool_type == "python":
-                code = remove_python_prefix(detect_result["tool_argument"])
+                code = remove_python_prefix(**detect_result["tool_argument"])
                 tool_start = time.time()
                 try:
                     new_code, execution_result = python_interpreter(code)
@@ -311,12 +289,12 @@ def _generate_with_tool_safe(input_argument: dict) -> str:
                 query = detect_result["tool_argument"]
                 tool_start = time.time()
                 try:
-                    print(f"Query for Google retrieval: '{query}'")
-                    execution_result = google_retriever(query)
+                    print(f"Query for Google retrieval: '{query["query"]}'")
+                    execution_result = google_retriever(**query)
                     result_text = execution_result.response if execution_result else ""
                 except Exception as e:
                     import traceback
-                    print(f"[ERROR] Retrieval failed for question:\n{question}")
+                    print(f"[ERROR] Retrieval failed.")
                     traceback.print_exc()
                     result_text = ""
 
@@ -333,66 +311,6 @@ def _generate_with_tool_safe(input_argument: dict) -> str:
                 # Resume generation right after saving
                 context += "\n<|im_start|>continue\n"
                 
-            # if last_python>last_retrieval:
-                
-            #     # Find the last occurrence of <im_start>python in the context
-            #     last_tool_index = context.rfind("<|im_start|>python")
-            #     result_index = context.rfind("<|im_start|>result")
-                
-            #     # Extract the code to run from context (between <im_start>python and <im_start>result)
-            #     code_to_run = context[last_tool_index + len("<|im_start|>python"):result_index]
-            #     code_to_run = remove_python_prefix(code_to_run)
-                
-            #     # Execute the code using the python_interpreter function and get the result
-            #     tool_start = time.time()
-                
-            #     new_code = None
-            #     try:
-            #         new_code,execution_result = python_interpreter(code_to_run)
-            #     except Exception as e:
-            #         import traceback
-            #         print(f"[ERROR] Exception for question:\n{question}\n")
-            #         traceback.print_exc()
-                
-            #     tool_duration = time.time() - tool_start
-            #     print(f"[Time] Python tool call took {tool_duration:.2f} seconds")
-                
-            #     if new_code is not None:
-            #         context = context[:last_tool_index]+new_code+'\n<|im_start|>result\n'+execution_result+"\n<|im_start|>continue\n"
-            #     else:
-            #         context = context[:last_tool_index]+'\n<|im_start|>result\n'+"\n<|im_start|>continue\n"
-                
-            #     tool_use = True
-            # else:
-            
-            #     # Find the last occurrence of <im_start>python in the context
-            #     last_tool_index = context.rfind("<|im_start|>retrieval")
-            #     result_index = context.rfind("<|im_start|>result")
-                
-            #     # Extract the code to run from context (between <im_start>python and <im_start>result)
-            #     query = context[last_tool_index + len("<|im_start|>retrieval\n"):result_index]
-            #     # Execute the code using the python_interpreter function and get the result
-            #     tool_start = time.time()
-                
-            #     execution_result = None
-            #     try:
-            #         print(f"Query for google retrieval: '{query}'")
-            #         execution_result = google_retriever(query)
-            #     except Exception as e:
-            #         import traceback
-            #         print(f"[ERROR] Exception for question:\n{question}\n")
-            #         traceback.print_exc()
-                    
-            #     tool_duration = time.time() - tool_start
-            #     print(f"[Time] Retrieval tool call took {tool_duration:.2f} seconds")
-            #     # Insert the execution result right after the <im_start>result token in the context
-            #     insertion_point = result_index + len("<|im_start|>result\n")
-            #     if execution_result is not None:
-            #         context = context[:insertion_point] + execution_result.response + "\n<|im_start|>continue\n"
-            #     else:
-            #         context = context[:insertion_point] + "\n<|im_start|>continue\n"
-                    
-            #     tool_use = True
 
         total_duration = time.time() - start_total_time
         print(f"[Time] Total processing time: {total_duration:.2f} seconds")
