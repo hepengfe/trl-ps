@@ -67,7 +67,6 @@ from .utils import (
     selective_log_softmax,
 )
 
-
 if is_peft_available():
     from peft import PeftConfig, get_peft_model
 
@@ -683,10 +682,11 @@ class GRPOTrainer(Trainer):
                 self.global_batch_size = global_batch_size
                 
             if args.tool_format == "qwen":
+                from ..tools.qwen_tool_utils import _generate_with_tool_safe
                 args.result_token = "<tool_response>"
                 args.continue_token = "</tool_response>"
             elif args.tool_format == "deepseek":
-                pass
+                from ..tools.qwen_tool_utils import _generate_with_tool_safe
             else:
                 raise ValueError(
                     f"Invalid tool format: {args.tool_format}. Supported formats are 'qwen' and 'deepseek'."

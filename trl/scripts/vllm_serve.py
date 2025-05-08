@@ -355,7 +355,8 @@ async def async_llm_worker(
                 result = []
                 try:
                     async for request_output in results_generator:
-                        result.append(request_output)
+                        # request_output is yielded like [token1], [token1, token2], ...
+                        result = request_output
                 except asyncio.CancelledError:
                     return Response(status_code=499)
                 
@@ -565,13 +566,13 @@ def main(script_args: ScriptArguments):
             print("sending connection!", kwargs)
             # all_outputs: List[RequestOutput] = connection.recv()
 
-            all_outputs = connection.recv()
-            completion_ids = [list(output.token_ids) for outputs in all_outputs for output in outputs.outputs]
-            completion_text = [list(output.text) for outputs in all_outputs for output in outputs.outputs]
+            all_outputs: RequestOutput = connection.recv()
+            # completion_ids = [list(output.token_ids) for outputs in all_outputs for output in outputs.outputs]
+            # completion_text = [output.text for outputs in all_outputs for output in outputs.outputs]
+            
+            completion_ids = [list(all_outputs.outputs[0].token_ids)]
+            completion_text = [all_outputs.outputs[0].text]
 
-            # completion_ids = [final_output.outputs[0].token_ids]
-            # completion_text = [final_output.outputs[0].text]
-            # return {"completion_ids": completion_ids, "completion_text": completion_text}
             return {"completion_ids": completion_ids, "completion_text": completion_text}
 
     class InitCommunicatorRequest(BaseModel):

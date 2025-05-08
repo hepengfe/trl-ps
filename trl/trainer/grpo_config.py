@@ -487,7 +487,7 @@ class GRPOConfig(TrainingArguments):
     )
     
     tool_format: str = field(
-        choice=["deepseek", "qwen"],
+        # choice=["deepseek", "qwen"],
         default="qwen",
         metadata={
             "help": "The format of the tool use. If set to `qwen`, the tool use will be in the format of "
@@ -515,7 +515,7 @@ class GRPOConfig(TrainingArguments):
     )
     
     saving_tokens: list[str] = field(
-        default=["<save>", "</save>"],
+        default_factory=lambda: ["<save>", "</save>"],
         metadata={
             "help": "Saving token to be detected during tool inference. If detected, "
             "will call saving and replace the thinking trajectory with summarization"
@@ -546,7 +546,7 @@ class GRPOConfig(TrainingArguments):
     )
     
     thinking_tokens: list[str] = field(
-        default=["<think>", "</think>"],
+        default_factory=lambda: ["<think>", "</think>"],
         metadata={
             "help": "Thinking token to be detected during tool inference. If detected, "
             "will append tool use results after the thinking token"
