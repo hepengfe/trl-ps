@@ -18,6 +18,7 @@ import asyncio
 import ctypes
 import logging
 import os
+import multiprocessing as mp
 from collections.abc import Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -293,47 +294,29 @@ async def async_llm_worker(
     os.environ["VLLM_DP_RANK_LOCAL"] = str(data_parallel_rank)
     os.environ["VLLM_DP_SIZE"] = str(script_args.data_parallel_size)
     os.environ["VLLM_DP_MASTER_PORT"] = str(master_port)
-
-    # llm = LLM(
-    #     model=script_args.model,
-    #     revision=script_args.revision,
-    #     tensor_parallel_size=script_args.tensor_parallel_size,
-    #     gpu_memory_utilization=script_args.gpu_memory_utilization,
-    #     enforce_eager=script_args.enforce_eager,
-    #     dtype=script_args.dtype,
-    #     # Automatic Prefix Caching caches the KV cache of existing queries, so that a new query can
-    #     # directly reuse the KV cache if it shares the same prefix with one of the existing queries.
-    #     # This is particularly useful here because we generate completions from the same prompts.
-    #     enable_prefix_caching=script_args.enable_prefix_caching,
-    #     max_model_len=script_args.max_model_len,
-    #     worker_extension_cls="trl.scripts.vllm_serve.WeightSyncWorkerExtension",
-    # )
     
-    engine_args = AsyncEngineArgs()
-    engine_args.model = script_args.model
-    engine_args.revision = script_args.revision
-    engine_args.tensor_parallel_size = script_args.tensor_parallel_size
-    engine_args.gpu_memory_utilization = script_args.gpu_memory_utilization
-    engine_args.enforce_eager = script_args.enforce_eager
-    engine_args.dtype = script_args.dtype
-    # Automatic Prefix Caching caches the KV cache of existing queries, so that a new query can
-    # directly reuse the KV cache if it shares the same prefix with one of the existing queries.
-    # This is particularly useful here because we generate completions from the same prompts.
-    engine_args.enable_prefix_caching = script_args.enable_prefix_caching
-    engine_args.max_model_len = script_args.max_model_len
-    engine_args.max_seq_len_to_capture = script_args.max_seq_len_to_capture
-    engine_args.worker_extension_cls = 'trl.scripts.vllm_serve.WeightSyncWorkerExtension'
-    engine_args.disable_log_stats = False
+    engine_args = AsyncEngineArgs(
+        model=script_args.model,
+        revision=script_args.revision,
+        tensor_parallel_size=script_args.tensor_parallel_size,
+        gpu_memory_utilization=script_args.gpu_memory_utilization,
+        enforce_eager=script_args.enforce_eager,
+        dtype=script_args.dtype,
+        enable_prefix_caching=script_args.enable_prefix_caching,
+        max_model_len=script_args.max_model_len,
+        worker_extension_cls='trl.scripts.vllm_serve.WeightSyncWorkerExtension',
+        disable_log_stats=False,
+    )
         
     envs.VLLM_USE_V1 = False
     vllm_config = engine_args.create_engine_config(usage_context=UsageContext.API_SERVER)
     
-    if envs.VLLM_USE_V1:
-        from vllm.v1.engine.async_llm import AsyncLLM as V1AsyncLLMEngine
-        async_engine_cls = V1AsyncLLMEngine
-    else:
-        from vllm.engine.async_llm_engine import AsyncLLMEngine
-        async_engine_cls = AsyncLLMEngine
+    # if envs.VLLM_USE_V1:
+    #     from vllm.v1.engine.async_llm import AsyncLLM as V1AsyncLLMEngine
+    #     async_engine_cls = V1AsyncLLMEngine
+    # else:
+    from vllm.engine.async_llm_engine import AsyncLLMEngine
+    async_engine_cls = AsyncLLMEngine
 
     llm = async_engine_cls.from_vllm_config(
         vllm_config=vllm_config,
@@ -429,6 +412,7 @@ def main(script_args: ScriptArguments):
         raise ImportError("vLLM is required to run the vLLM serve script. Please install it using `pip install vllm`.")
 
     # Spawn dp workers, and setup pipes for communication
+    mp.set_start_method("spawn", force=True)
     master_port = get_open_port()
     connections = []
     processes = []
