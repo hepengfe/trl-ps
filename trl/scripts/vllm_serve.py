@@ -63,7 +63,6 @@ if is_vllm_available():
     from vllm.usage.usage_lib import UsageContext
     from vllm.utils import FlexibleArgumentParser, random_uuid, set_ulimit
     import vllm.envs as envs
-    from vllm.outputs import RequestOutput
 else:
     Worker = object
 
@@ -267,11 +266,9 @@ class ScriptArguments:
             "'trace'."
         },
     )
-    
-def llm_worker(*args):
-    asyncio.run(async_llm_worker(*args))
 
-async def async_llm_worker(
+
+def llm_worker(
     script_args: ScriptArguments, data_parallel_rank: int, master_port: int, connection: Connection
 ) -> None:
     # Set required environment variables for DP to work with vLLM
@@ -280,89 +277,38 @@ async def async_llm_worker(
     os.environ["VLLM_DP_SIZE"] = str(script_args.data_parallel_size)
     os.environ["VLLM_DP_MASTER_PORT"] = str(master_port)
 
-    # llm = LLM(
-    #     model=script_args.model,
-    #     revision=script_args.revision,
-    #     tensor_parallel_size=script_args.tensor_parallel_size,
-    #     gpu_memory_utilization=script_args.gpu_memory_utilization,
-    #     enforce_eager=script_args.enforce_eager,
-    #     dtype=script_args.dtype,
-    #     # Automatic Prefix Caching caches the KV cache of existing queries, so that a new query can
-    #     # directly reuse the KV cache if it shares the same prefix with one of the existing queries.
-    #     # This is particularly useful here because we generate completions from the same prompts.
-    #     enable_prefix_caching=script_args.enable_prefix_caching,
-    #     max_model_len=script_args.max_model_len,
-    #     worker_extension_cls="trl.scripts.vllm_serve.WeightSyncWorkerExtension",
-    # )
-    
-    engine_args = AsyncEngineArgs()
-    engine_args.model = script_args.model
-    engine_args.revision = script_args.revision
-    engine_args.tensor_parallel_size = script_args.tensor_parallel_size
-    engine_args.gpu_memory_utilization = script_args.gpu_memory_utilization
-    engine_args.enforce_eager = script_args.enforce_eager
-    engine_args.dtype = script_args.dtype
-    # Automatic Prefix Caching caches the KV cache of existing queries, so that a new query can
-    # directly reuse the KV cache if it shares the same prefix with one of the existing queries.
-    # This is particularly useful here because we generate completions from the same prompts.
-    engine_args.enable_prefix_caching = script_args.enable_prefix_caching
-    engine_args.max_model_len = script_args.max_model_len
-    engine_args.worker_extension_cls = 'trl.scripts.vllm_serve.WeightSyncWorkerExtension'
-    engine_args.disable_log_stats = False
-        
-    envs.VLLM_USE_V1 = True
-    vllm_config = engine_args.create_engine_config(usage_context=UsageContext.API_SERVER)
-    
-    if envs.VLLM_USE_V1:
-        from vllm.v1.engine.async_llm import AsyncLLM as V1AsyncLLMEngine
-        async_engine_cls = V1AsyncLLMEngine
-
-    llm = async_engine_cls.from_vllm_config(
-        vllm_config=vllm_config,
-        start_engine_loop=True,
-        usage_context=UsageContext.API_SERVER,
-        stat_loggers=None,
-        disable_log_stats=engine_args.disable_log_stats,
-        disable_log_requests=engine_args.disable_log_requests,
+    llm = LLM(
+        model=script_args.model,
+        revision=script_args.revision,
+        tensor_parallel_size=script_args.tensor_parallel_size,
+        gpu_memory_utilization=script_args.gpu_memory_utilization,
+        enforce_eager=script_args.enforce_eager,
+        dtype=script_args.dtype,
+        # Automatic Prefix Caching caches the KV cache of existing queries, so that a new query can
+        # directly reuse the KV cache if it shares the same prefix with one of the existing queries.
+        # This is particularly useful here because we generate completions from the same prompts.
+        enable_prefix_caching=script_args.enable_prefix_caching,
+        max_model_len=script_args.max_model_len,
+        worker_extension_cls="trl.scripts.vllm_serve.WeightSyncWorkerExtension",
     )
 
     # Send ready signal to parent process
     connection.send({"status": "ready"})
-    
-    def get_nested_attr(obj, attr_path):
-        for attr in attr_path.split("."):
-            obj = getattr(obj, attr)
-        return obj
-
 
     while True:
         # Wait for commands from the parent process
         try:
             command = connection.recv()
         except KeyboardInterrupt:
-            llm.engine_core.collective_rpc_async(method="close_communicator")
+            llm.collective_rpc(method="close_communicator")
             break
 
         # Handle commands
         if command["type"] in ["call", "fire_and_forget"]:
             method_name = command["method"]
             args, kwargs = command.get("args", ()), command.get("kwargs", {})
-
-            method = get_nested_attr(llm, method_name)
-
-            if method == llm.generate:
-                results_generator = method(*args, **kwargs)
-                result = []
-                try:
-                    async for request_output in results_generator:
-                        # request_output is yielded like [token1], [token1, token2], ...
-                        result = request_output
-                except asyncio.CancelledError:
-                    return Response(status_code=499)
-                
-            else:
-                result = await method(*args, **kwargs)
-            
+            method = getattr(llm, method_name)
+            result = method(*args, **kwargs)
             if command["type"] == "call":
                 connection.send(result)
         elif command["type"] == "shutdown":
@@ -415,9 +361,6 @@ def main(script_args: ScriptArguments):
         connections.append(parent_connection)
         processes.append(process)
 
-    # for round-robin type requests in tool inference
-    connection_to_send = 0
-    
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         # Wait for all workers to send "ready"
@@ -438,6 +381,36 @@ def main(script_args: ScriptArguments):
                 process.terminate()
                 process.join()  # ensure process termination after calling terminate()
 
+    
+    engine_args = AsyncEngineArgs()
+    engine_args.model = script_args.model
+    engine_args.revision = script_args.revision
+    engine_args.tensor_parallel_size = script_args.tensor_parallel_size
+    engine_args.gpu_memory_utilization = script_args.gpu_memory_utilization
+    engine_args.dtype = script_args.dtype
+    # Automatic Prefix Caching caches the KV cache of existing queries, so that a new query can
+    # directly reuse the KV cache if it shares the same prefix with one of the existing queries.
+    # This is particularly useful here because we generate completions from the same prompts.
+    engine_args.enable_prefix_caching = script_args.enable_prefix_caching
+    engine_args.max_model_len = script_args.max_model_len
+    engine_args.worker_extension_cls = 'trl.scripts.vllm_serve.WeightSyncWorkerExtension'
+    engine_args.disable_log_stats = False
+        
+    envs.VLLM_USE_V1 = True
+    vllm_config = engine_args.create_engine_config(usage_context=UsageContext.API_SERVER)
+    
+    if envs.VLLM_USE_V1:
+        from vllm.v1.engine.async_llm import AsyncLLM as V1AsyncLLMEngine
+        async_engine_cls = V1AsyncLLMEngine
+
+    llm = async_engine_cls.from_vllm_config(
+        vllm_config=vllm_config,
+        start_engine_loop=True,
+        usage_context=UsageContext.API_SERVER,
+        stat_loggers=None,
+        disable_log_stats=engine_args.disable_log_stats,
+        disable_log_requests=engine_args.disable_log_requests,
+    )
     app = FastAPI(lifespan=lifespan)
 
     # Define the endpoints for the model server
@@ -467,7 +440,7 @@ def main(script_args: ScriptArguments):
 #         return {"tensor_parallel_size": llm.processor.vllm_config.parallel_config.tensor_parallel_size}
 
     class GenerateRequest(BaseModel):
-        prompts: List[str]
+        prompt: str
         n: int = 1
         repetition_penalty: float = 1.0
         temperature: float = 1.0
@@ -525,55 +498,52 @@ def main(script_args: ScriptArguments):
             stop=request.stop,
         )
         request_id = random_uuid()        
+        results_generator = llm.generate(
+            prompt=request.prompt,
+            sampling_params=sampling_params,
+            request_id=request_id,
+        )
 
-        # batched generation, non-tool-use
-        if len(request.prompts) > 1:
-            # Evenly distribute prompts across DP ranks
-            chunked_prompts = chunk_list(request.prompts, script_args.data_parallel_size)
+        # Evenly distribute prompts across DP ranks
+        chunked_prompts = chunk_list(request.prompts, script_args.data_parallel_size)
 
-            # Send the prompts to each worker
-            for connection, prompts in zip(connections, chunked_prompts):
-                # When the number of prompts is less than data_parallel_size, some workers will receive empty prompts.
-                # However, vLLM requires that we always send at least one prompt. So we send a placeholder prompt to comply
-                # with vLLM's requirement, and we later ignore the result.
-                if not prompts:
-                    prompts = ["<placeholder>"]
-                    
-                for prompt in prompts:
-                    kwargs = {"prompt": prompt, "sampling_params": sampling_params}
-                    connection.send({"type": "call", "method": "generate", "kwargs": kwargs})
-
-            # TODO: haven't debugged this if
-            # Receive results
-            all_outputs = [connection.recv() for connection in connections]
-
-            # Handle empty prompts (see above)
-            all_outputs = [output for output, prompts in zip(all_outputs, chunked_prompts) if prompts]
-
-            # Flatten and combine all results
-            all_outputs = list(chain.from_iterable(all_outputs))  # from list of list to single list
-            completion_ids = [list(output.token_ids) for outputs in all_outputs for output in outputs.outputs]
-            return {"completion_ids": completion_ids, "completion_text": None}
-        
-        # 1 prompt in each request, tool-use case
-        else:
-            kwargs = {"prompt": request.prompts[0], "sampling_params": sampling_params, "request_id": request_id}
-            nonlocal connection_to_send
-            connection = connections[connection_to_send]
-            connection_to_send = (connection_to_send + 1) % script_args.data_parallel_size
+        # Send the prompts to each worker
+        for connection, prompts in zip(connections, chunked_prompts):
+            # When the number of prompts is less than data_parallel_size, some workers will receive empty prompts.
+            # However, vLLM requires that we always send at least one prompt. So we send a placeholder prompt to comply
+            # with vLLM's requirement, and we later ignore the result.
+            if not prompts:
+                prompts = ["<placeholder>"]
+            kwargs = {"prompts": prompts, "sampling_params": sampling_params}
             connection.send({"type": "call", "method": "generate", "kwargs": kwargs})
-            
-            print("sending connection!", kwargs)
-            # all_outputs: List[RequestOutput] = connection.recv()
 
-            all_outputs: RequestOutput = connection.recv()
-            # completion_ids = [list(output.token_ids) for outputs in all_outputs for output in outputs.outputs]
-            # completion_text = [output.text for outputs in all_outputs for output in outputs.outputs]
-            
-            completion_ids = [list(all_outputs.outputs[0].token_ids)]
-            completion_text = [all_outputs.outputs[0].text]
+        # Receive results
+        all_outputs = [connection.recv() for connection in connections]
 
-            return {"completion_ids": completion_ids, "completion_text": completion_text}
+        # Handle empty prompts (see above)
+        all_outputs = [output for output, prompts in zip(all_outputs, chunked_prompts) if prompts]
+
+        # Flatten and combine all results
+        all_outputs = list(chain.from_iterable(all_outputs))  # from list of list to single list
+        completion_ids = [list(output.token_ids) for outputs in all_outputs for output in outputs.outputs]
+        return {"completion_ids": completion_ids}
+            
+#         # Non-streaming case
+#         final_output = None
+#         try:
+#             async for request_output in results_generator:
+#                 # if await request.is_disconnected():
+#                     # Abort the request if the client disconnects.
+#                     # await llm.abort(request_id)
+#                     # Return or raise an error
+#                 final_output = request_output
+#         except asyncio.CancelledError:
+#             return Response(status_code=499)
+        
+#         completion_ids = [final_output.outputs[0].token_ids]
+#         completion_text = [final_output.outputs[0].text]
+#         return {"completion_ids": completion_ids, "completion_text": completion_text}
+
 
     class InitCommunicatorRequest(BaseModel):
         host: str
@@ -600,7 +570,7 @@ def main(script_args: ScriptArguments):
         # llm.collective_rpc(method="init_communicator", args=(host, port, world_size))
         kwargs = {"method": "init_communicator", "args": (request.host, request.port, world_size)}
         for connection in connections:
-            connection.send({"type": "fire_and_forget", "method": "engine_core.collective_rpc_async", "kwargs": kwargs})
+            connection.send({"type": "fire_and_forget", "method": "collective_rpc", "kwargs": kwargs})
 
 
 #         background_tasks.add_task(
@@ -637,7 +607,7 @@ def main(script_args: ScriptArguments):
 
         kwargs = {"method": "update_named_param", "args": (request.name, dtype, tuple(request.shape))}
         for connection in connections:
-            connection.send({"type": "fire_and_forget", "method": "engine_core.collective_rpc_async", "kwargs": kwargs})
+            connection.send({"type": "fire_and_forget", "method": "collective_rpc", "kwargs": kwargs})
 
 #         background_tasks.add_task(llm.engine_core.collective_rpc_async, "update_named_param", args=(request.name, dtype, request.shape))
 
@@ -651,7 +621,7 @@ def main(script_args: ScriptArguments):
         """
 
         for connection in connections:
-            connection.send({"type": "call", "method": "engine_core.reset_prefix_cache_async"})
+            connection.send({"type": "call", "method": "reset_prefix_cache"})
         # Wait for and collect all results
         all_outputs = [connection.recv() for connection in connections]
         success = all(output for output in all_outputs)
@@ -668,7 +638,7 @@ def main(script_args: ScriptArguments):
 
         kwargs = {"method": "close_communicator"}
         for connection in connections:
-            connection.send({"type": "fire_and_forget", "method": "engine_core.collective_rpc_async", "kwargs": kwargs})
+            connection.send({"type": "fire_and_forget", "method": "collective_rpc", "kwargs": kwargs})
         return {"message": "Request received, closing communicator"}
 
     # Start the server

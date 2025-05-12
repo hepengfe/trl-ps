@@ -29,6 +29,7 @@ from .scripts.utils import TrlParser
 from .scripts.vllm_serve import main as vllm_serve_main
 from .scripts.vllm_serve import make_parser as make_vllm_serve_parser
 from .scripts.async_vllm_serve import main as async_vllm_serve_main
+from .scripts.async_vllm_serve import make_parser as make_async_vllm_serve_parser
 
 
 def main():
@@ -45,6 +46,7 @@ def main():
     make_kto_parser(subparsers)
     make_sft_parser(subparsers)
     make_vllm_serve_parser(subparsers)
+    make_async_vllm_serve_parser(subparsers)
 
     # Parse the arguments
     args = parser.parse_args_and_config()[0]

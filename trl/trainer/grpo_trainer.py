@@ -66,6 +66,7 @@ from .utils import (
     print_prompt_completions_sample,
     selective_log_softmax,
 )
+from ..tools.qwen_tool_utils import generate_with_tool_safe
 
 if is_peft_available():
     from peft import PeftConfig, get_peft_model
@@ -1035,7 +1036,7 @@ class GRPOTrainer(Trainer):
         ]
         
         with multiprocessing.Pool(processes=max_processes) as pool:
-            for result, tool_use in pool.imap(_generate_with_tool_safe, input_arguments):
+            for result, tool_use in pool.imap(generate_with_tool_safe, input_arguments):
                 # results.append(result)
                 if tool_use:
                     num_tool_use += 1

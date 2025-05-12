@@ -64,6 +64,8 @@ if is_vllm_available():
     from vllm.utils import FlexibleArgumentParser, random_uuid, set_ulimit
     import vllm.envs as envs
     from vllm.outputs import RequestOutput
+    from vllm.engine.metrics import LoggingStatLogger
+
 else:
     Worker = object
 
@@ -187,6 +189,10 @@ class ScriptArguments:
             If set, the `max_model_len` to use for vLLM. This can be useful when running with reduced
             `vllm_gpu_memory_utilization`, leading to a reduced KV cache size. If not set, vLLM will use the model
             context size, which might be much larger than the KV cache, leading to inefficiencies.
+        max_seq_len_to_capture (`int` or `None`, *optional*, defaults to `None`):
+            Maximum sequence len covered by CUDA graphs. When a sequence has context length larger than this, 
+            we fall back to eager mode. Additionally for encoder-decoder models, if the sequence length of the 
+            input is larger than this, we fall back to the eager mode.
         enable_prefix_caching (`bool` or `None`, *optional*, defaults to `None`):
             Whether to enable prefix caching in vLLM. If set to `True`, ensure that the model and the hardware support
             this feature.
@@ -243,6 +249,14 @@ class ScriptArguments:
             "help": "If set, the `max_model_len` to use for vLLM. This can be useful when running with reduced "
             "`vllm_gpu_memory_utilization`, leading to a reduced KV cache size. If not set, vLLM will use the model "
             "context size, which might be much larger than the KV cache, leading to inefficiencies."
+        },
+    )
+    max_seq_len_to_capture: Optional[int] = field(
+        default=None,
+        metadata={
+            "help": "Maximum sequence len covered by CUDA graphs. When a sequence has context length larger than this, "
+            "we fall back to eager mode. Additionally for encoder-decoder models, if the sequence length of the "
+            "input is larger than this, we fall back to the eager mode."
         },
     )
     enable_prefix_caching: Optional[bool] = field(
@@ -307,6 +321,7 @@ async def async_llm_worker(
     # This is particularly useful here because we generate completions from the same prompts.
     engine_args.enable_prefix_caching = script_args.enable_prefix_caching
     engine_args.max_model_len = script_args.max_model_len
+    engine_args.max_seq_len_to_capture = script_args.max_seq_len_to_capture
     engine_args.worker_extension_cls = 'trl.scripts.vllm_serve.WeightSyncWorkerExtension'
     engine_args.disable_log_stats = False
         
@@ -325,6 +340,12 @@ async def async_llm_worker(
         disable_log_stats=engine_args.disable_log_stats,
         disable_log_requests=engine_args.disable_log_requests,
     )
+    from prometheus_client import start_http_server
+
+    # Start Prometheus metrics HTTP server on a unique port per DP rank
+    metrics_port = 8008 + data_parallel_rank    
+    start_http_server(metrics_port)
+
 
     # Send ready signal to parent process
     connection.send({"status": "ready"})
@@ -680,7 +701,7 @@ def main(script_args: ScriptArguments):
 
 def make_parser(subparsers: argparse._SubParsersAction = None):
     if subparsers is not None:
-        parser = subparsers.add_parser("vllm-serve", help="Run the vLLM serve script", dataclass_types=ScriptArguments)
+        parser = subparsers.add_parser("async-vllm-serve", help="Run the vLLM serve script", dataclass_types=ScriptArguments)
     else:
         parser = TrlParser(ScriptArguments)
     return parser

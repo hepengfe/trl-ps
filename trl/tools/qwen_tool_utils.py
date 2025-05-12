@@ -92,7 +92,7 @@ from ..trainer.grpo_config import GRPOConfig
 # <|im_start|>user
 # """
 
-SYSTEM_PROMPT =  f"""<|im_start|>system
+SYSTEM_PROMPT =  f"""
 You are a helpful assistant. You are good at following instructions and using given tools.
 
 # Tools
@@ -112,34 +112,20 @@ For each function call, return a json object with function name and arguments wi
 {{"type":"function","function":{{"name":"retrieval","description":"Used to verify factual information or retrieve up-to-date external content via a search engine. This tool ensures factual accuracy by accessing web-based data sources.","parameters":{{"type":"object","properties":{{"query":{{"type":"string","description":"The search query or question to be retrieved from the web."}}}},"required":["query"]}}}}}}
 </tools>
 
-When you need to verify any factual information or retrieve current data, you MUST insert the following command immediately at the point of need:
-
-<tool_call>
-{{"name": "retrieval", "arguments": {{"query": <replace_with_your_retrieval_query>}}}}
-</tool_call>
-
 - **Python Interpreter Tool:**
 <tools>
 {{"type":"function","function":{{"name":"python","description":"Used for performing calculations, debugging code, or validating intermediate results through Python execution. Ensures correctness for all non-trivial quantitative or logical steps.","parameters":{{"type":"object","properties":{{"code":{{"type":"string","description":"A concise Python code snippet to execute. Must be self-contained and return the desired output."}}}},"required":["code"]}}}}}}
 </tools>
 
-For any calculations, code debugging, or intermediate quantitative validations, you MUST insert a single, concise code snippet using the format below:
-
-<tool_call>
-{{"name": "python", "arguments": {{"code": <replace_with_your_python_code>}}}}
-</tool_call>
 
 - **Thinking Summarization Tool:**
-If the previous thinking is too lengthy, you MUST call Thinking Summarization Tool to replace previous thinking with summarization.
+If the previous thinking is too lengthy, you MUST call Thinking Summarization Tool to replace previous thinking with summarization using the following arguments.
 
 <tool_call>
 {{"name": "saving", "arguments": None}}
 </tool_call>
 
 - The final answer must be enclosed within LaTeX using `\\boxed{{}}` immediately after the **Final Answer** header.
-
-<|im_end|>
-<|im_start|>user
 """
 
 
@@ -244,8 +230,9 @@ def _generate_with_tool(
     Generates text from the LLM using vLLM, detects tool triggers,
     invokes tools (python or retrieval), and updates the context accordingly.
     """    
-    # Initialize the context
-    context = SYSTEM_PROMPT + question + f"\n<|im_end|>\n{args.assistant_token}\n{args.thinking_tokens[0]}\n"
+    # Initialize the context, we don't do manual formatting anymore
+    context = question
+    # context = SYSTEM_PROMPT + question + f"\n<|im_end|>\n{args.assistant_token}\n{args.thinking_tokens[0]}\n"
     
     tokens_left = args.max_completion_length
     # TODO: maybe change prompt_ids with inftythink
@@ -291,70 +278,71 @@ def _generate_with_tool(
         detect_result = _detect_tool_use(context, prompt_idx, tokens_left, args)
         if detect_result["error_tool_use"]:
             print("[ERROR] Malformed tool call detected.")
+        break
             
-            
-        if detect_result["tool_use"] == False or tokens_left == 0:
-            context += "\n<|im_start|>answer\n"
-            return_ids, completion_text = _make_tool_inference_requests(
-                prompt=context,
-                max_tokens=512,
-                args=args,
-                stop=[args.eos_token]
-            )
-            context += f"\n{completion_text}\n{args.eos_token}"
-            break
+        # if detect_result["tool_use"] == False or tokens_left == 0:
+        #     context += "\n<|im_start|>answer\n"
+        #     return_ids, completion_text = _make_tool_inference_requests(
+        #         prompt=context,
+        #         max_tokens=512,
+        #         args=args,
+        #         stop=[args.eos_token]
+        #     )
+        #     context += f"\n{completion_text}\n{args.eos_token}"
+        #     break
         
         
-        # After the previous if argument, now the stop reason must be getting a result token.
-        context += f'\n{args.result_token}\n'
-        tool_use_stat["tool_use"] = True
-        tool_type = detect_result["tool_type"]
+        # # After the previous if argument, now the stop reason must be getting a result token.
+        # context += f'\n{args.result_token}\n'
+        # tool_use_stat["tool_use"] = True
+        # tool_type = detect_result["tool_type"]
 
-        if tool_type == "python":
-            code = remove_python_prefix(**detect_result["tool_argument"])
-            tool_start = time.time()
-            try:
-                new_code, execution_result = python_interpreter(code)
-            except Exception as e:
-                import traceback
-                print(f"[ERROR] Python execution failed for question:\n{question}")
-                traceback.print_exc()
-                new_code, execution_result = None, ""
+        # if tool_type == "python":
+        #     code = remove_python_prefix(**detect_result["tool_argument"])
+        #     tool_start = time.time()
+        #     try:
+        #         new_code, execution_result = python_interpreter(code)
+        #     except Exception as e:
+        #         import traceback
+        #         print(f"[ERROR] Python execution failed for question:\n{question}")
+        #         traceback.print_exc()
+        #         new_code, execution_result = None, ""
 
-            tool_duration = time.time() - tool_start
-            print(f"[Time] Python tool call took {tool_duration:.2f} seconds")
+        #     tool_duration = time.time() - tool_start
+        #     print(f"[Time] Python tool call took {tool_duration:.2f} seconds")
 
-            last_tool_index = context.rfind(args.python_token)
-            if new_code:
-                context = context[:last_tool_index] + new_code + "\n<|im_start|>result\n" + execution_result + "\n<|im_start|>continue\n"
-            else:
-                context = context[:last_tool_index] + "\n<|im_start|>result\n" + execution_result + "\n<|im_start|>continue\n"
+        #     last_tool_index = context.rfind(args.python_token)
+        #     # TODO: fix this
+        #     # if new_code:
+        #     #     context = context[:last_tool_index] + new_code + "\n<|im_start|>result\n" + execution_result + "\n<|im_start|>continue\n"
+        #     # else:
+        #     #     context = context[:last_tool_index] + "\n<|im_start|>result\n" + execution_result + "\n<|im_start|>continue\n"
 
-        elif tool_type == "retrieval":
-            query = detect_result["tool_argument"]
-            tool_start = time.time()
-            try:
-                print(f"Query for Google retrieval: '{query['query']}'")
-                execution_result = google_retriever(**query)
-                result_text = execution_result.response if execution_result else ""
-            except Exception as e:
-                import traceback
-                print(f"[ERROR] Retrieval failed.")
-                traceback.print_exc()
-                result_text = ""
+        # elif tool_type == "retrieval":
+        #     query = detect_result["tool_argument"]
+        #     tool_start = time.time()
+        #     try:
+        #         print(f"Query for Google retrieval: '{query['query']}'")
+        #         execution_result = google_retriever(**query)
+        #         result_text = execution_result.response if execution_result else ""
+        #     except Exception as e:
+        #         import traceback
+        #         print(f"[ERROR] Retrieval failed.")
+        #         traceback.print_exc()
+        #         result_text = ""
 
-            tool_duration = time.time() - tool_start
-            print(f"[Time] Retrieval tool call took {tool_duration:.2f} seconds")
+        #     tool_duration = time.time() - tool_start
+        #     print(f"[Time] Retrieval tool call took {tool_duration:.2f} seconds")
 
-            result_index = context.rfind(args.result_token)
-            context = context[:result_index + len(args.result_token)] + result_text + "\n<|im_start|>continue\n"
+        #     result_index = context.rfind(args.result_token)
+        #     context = context[:result_index + len(args.result_token)] + result_text + "\n<|im_start|>continue\n"
 
-        elif tool_type == "saving":
-            start_idx, end_idx, extracted = detect_result["tool_argument"]
-            print(f"[INFO] Detected saving block: {extracted}")
-            context = context[:prompt_idx + start_idx] + extracted + context[prompt_idx + end_idx:]
-            # Resume generation right after saving
-            context += "\n<|im_start|>continue\n"
+        # elif tool_type == "saving":
+        #     start_idx, end_idx, extracted = detect_result["tool_argument"]
+        #     print(f"[INFO] Detected saving block: {extracted}")
+        #     context = context[:prompt_idx + start_idx] + extracted + context[prompt_idx + end_idx:]
+        #     # Resume generation right after saving
+        #     context += "\n<|im_start|>continue\n"
             
 
     total_duration = time.time() - start_total_time

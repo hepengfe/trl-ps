@@ -8,6 +8,10 @@ import random
 # dataset = load_dataset("simplescaling/aime24_nofigures", split="train[:3]")  # only 3 for quick test
 dataset = load_dataset("simplescaling/aime24_nofigures", split="train")
 
+from transformers import AutoTokenizer
+tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-4B", trust_remote_code=True)
+
+
 # Prepare input prompts
 prompt_prefix = ""
 questions = [
@@ -18,12 +22,12 @@ questions = [
 config = GRPOConfig(
     vllm_server_host="localhost",
     vllm_server_port=8000,
-    repetition_penalty=1.0,
+    repetition_penalty=1.5,
     temperature=0.6,
     top_p=0.95,
     top_k=20,
     min_p=0.0,
-    max_completion_length=32768,
+    max_completion_length=2048,
     vllm_guided_decoding_regex=None,
     eos_token="<|im_end|>",
     result_token="</tool_response>",
@@ -39,6 +43,18 @@ for i, question in enumerate(questions):
     # if i > 0:
     #     break
     print(f"\n=== Running Question {i + 1} ===")
+    chat = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": question}
+    ]
+    question = tokenizer.apply_chat_template(
+        chat, 
+        tokenize=False, 
+        add_generation_prompt=True,
+        enable_thinking=True,
+    )
+    # print(question)
+
     input_arg = {
         "question": question,
         "args": config
