@@ -54,6 +54,8 @@ for i, question in enumerate(questions):
         enable_thinking=True,
     )
     # print(question)
+    
+    output_path = "/alloc/s1-tool/s1_tool/tools/jsonl/qwen3_output_5_12.json"
 
     input_arg = {
         "question": question,
@@ -67,11 +69,11 @@ for i, question in enumerate(questions):
             "output": output,
             "tool_stats": tool_stats
         })
-        with open("/workspace/s1-tool/s1_tool/tools/jsonl/deepseek_output_5_11.json", "w") as f:
+        with open(output_path, "w") as f:
             json.dump(results, f, indent=4)
             
             
-        dataset = load_dataset("json", data_files="/workspace/s1-tool/s1_tool/tools/jsonl/deepseek_output_5_11.json", split="train")
+        dataset = load_dataset("json", data_files=output_path, split="train")
         dataset.push_to_hub("ryzax/deepseek_output_viewer")
 
     except Exception as e:
