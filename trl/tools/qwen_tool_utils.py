@@ -269,71 +269,71 @@ def _generate_with_tool(
         detect_result = _detect_tool_use(context, prompt_idx, tokens_left, args)
         if detect_result["error_tool_use"]:
             print("[ERROR] Malformed tool call detected.")
-        break
+
             
-        # if detect_result["tool_use"] == False or tokens_left == 0:
-        #     context += "\n<|im_start|>answer\n"
-        #     return_ids, completion_text = _make_tool_inference_requests(
-        #         prompt=context,
-        #         max_tokens=512,
-        #         args=args,
-        #         stop=[args.eos_token]
-        #     )
-        #     context += f"\n{completion_text}\n{args.eos_token}"
-        #     break
+        if detect_result["tool_use"] == False or tokens_left == 0:
+            context += "\n<|im_start|>answer\n"
+            return_ids, completion_text = _make_tool_inference_requests(
+                prompt=context,
+                max_tokens=512,
+                args=args,
+                stop=[args.eos_token]
+            )
+            context += f"\n{completion_text}\n{args.eos_token}"
+            break
         
         
-        # # After the previous if argument, now the stop reason must be getting a result token.
-        # context += f'\n{args.result_token}\n'
-        # tool_use_stat["tool_use"] = True
-        # tool_type = detect_result["tool_type"]
+        # After the previous if argument, now the stop reason must be getting a result token.
+        context += f'\n{args.result_token}\n'
+        tool_use_stat["tool_use"] = True
+        tool_type = detect_result["tool_type"]
 
-        # if tool_type == "python":
-        #     code = remove_python_prefix(**detect_result["tool_argument"])
-        #     tool_start = time.time()
-        #     try:
-        #         new_code, execution_result = python_interpreter(code)
-        #     except Exception as e:
-        #         import traceback
-        #         print(f"[ERROR] Python execution failed for question:\n{question}")
-        #         traceback.print_exc()
-        #         new_code, execution_result = None, ""
+        if tool_type == "python":
+            code = remove_python_prefix(**detect_result["tool_argument"])
+            tool_start = time.time()
+            try:
+                new_code, execution_result = python_interpreter(code)
+            except Exception as e:
+                import traceback
+                print(f"[ERROR] Python execution failed for question:\n{question}")
+                traceback.print_exc()
+                new_code, execution_result = None, ""
 
-        #     tool_duration = time.time() - tool_start
-        #     print(f"[Time] Python tool call took {tool_duration:.2f} seconds")
+            tool_duration = time.time() - tool_start
+            print(f"[Time] Python tool call took {tool_duration:.2f} seconds")
 
-        #     last_tool_index = context.rfind(args.python_token)
-        #     # TODO: fix this
-        #     # if new_code:
-        #     #     context = context[:last_tool_index] + new_code + "\n<|im_start|>result\n" + execution_result + "\n<|im_start|>continue\n"
-        #     # else:
-        #     #     context = context[:last_tool_index] + "\n<|im_start|>result\n" + execution_result + "\n<|im_start|>continue\n"
+            last_tool_index = context.rfind(args.python_token)
+            # TODO: fix this
+            # if new_code:
+            #     context = context[:last_tool_index] + new_code + "\n<|im_start|>result\n" + execution_result + "\n<|im_start|>continue\n"
+            # else:
+            #     context = context[:last_tool_index] + "\n<|im_start|>result\n" + execution_result + "\n<|im_start|>continue\n"
 
-        # elif tool_type == "retrieval":
-        #     query = detect_result["tool_argument"]
-        #     tool_start = time.time()
-        #     try:
-        #         print(f"Query for Google retrieval: '{query['query']}'")
-        #         execution_result = google_retriever(**query)
-        #         result_text = execution_result.response if execution_result else ""
-        #     except Exception as e:
-        #         import traceback
-        #         print(f"[ERROR] Retrieval failed.")
-        #         traceback.print_exc()
-        #         result_text = ""
+        elif tool_type == "retrieval":
+            query = detect_result["tool_argument"]
+            tool_start = time.time()
+            try:
+                print(f"Query for Google retrieval: '{query['query']}'")
+                execution_result = google_retriever(**query)
+                result_text = execution_result.response if execution_result else ""
+            except Exception as e:
+                import traceback
+                print(f"[ERROR] Retrieval failed.")
+                traceback.print_exc()
+                result_text = ""
 
-        #     tool_duration = time.time() - tool_start
-        #     print(f"[Time] Retrieval tool call took {tool_duration:.2f} seconds")
+            tool_duration = time.time() - tool_start
+            print(f"[Time] Retrieval tool call took {tool_duration:.2f} seconds")
 
-        #     result_index = context.rfind(args.result_token)
-        #     context = context[:result_index + len(args.result_token)] + result_text + "\n<|im_start|>continue\n"
+            result_index = context.rfind(args.result_token)
+            context = context[:result_index + len(args.result_token)] + result_text + "\n<|im_start|>continue\n"
 
-        # elif tool_type == "saving":
-        #     start_idx, end_idx, extracted = detect_result["tool_argument"]
-        #     print(f"[INFO] Detected saving block: {extracted}")
-        #     context = context[:prompt_idx + start_idx] + extracted + context[prompt_idx + end_idx:]
-        #     # Resume generation right after saving
-        #     context += "\n<|im_start|>continue\n"
+        elif tool_type == "saving":
+            start_idx, end_idx, extracted = detect_result["tool_argument"]
+            print(f"[INFO] Detected saving block: {extracted}")
+            context = context[:prompt_idx + start_idx] + extracted + context[prompt_idx + end_idx:]
+            # Resume generation right after saving
+            context += "\n<|im_start|>continue\n"
             
 
     total_duration = time.time() - start_total_time
