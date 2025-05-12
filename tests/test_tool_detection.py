@@ -74,7 +74,7 @@ for i, question in enumerate(questions):
             
             
         dataset = load_dataset("json", data_files=output_path, split="train")
-        dataset.push_to_hub("ryzax/deepseek_output_viewer")
+        dataset.push_to_hub("ryzax/qwen3_output_viewer")
 
     except Exception as e:
         print(f"[ERROR] Failed on question {i + 1}: {str(e)}")

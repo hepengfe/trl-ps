@@ -325,12 +325,15 @@ async def async_llm_worker(
     engine_args.worker_extension_cls = 'trl.scripts.vllm_serve.WeightSyncWorkerExtension'
     engine_args.disable_log_stats = False
         
-    envs.VLLM_USE_V1 = True
+    envs.VLLM_USE_V1 = False
     vllm_config = engine_args.create_engine_config(usage_context=UsageContext.API_SERVER)
     
     if envs.VLLM_USE_V1:
         from vllm.v1.engine.async_llm import AsyncLLM as V1AsyncLLMEngine
         async_engine_cls = V1AsyncLLMEngine
+    else:
+        from vllm.engine.async_llm_engine import AsyncLLMEngine
+        async_engine_cls = AsyncLLMEngine
 
     llm = async_engine_cls.from_vllm_config(
         vllm_config=vllm_config,
@@ -340,11 +343,11 @@ async def async_llm_worker(
         disable_log_stats=engine_args.disable_log_stats,
         disable_log_requests=engine_args.disable_log_requests,
     )
-    from prometheus_client import start_http_server
-
+    
+    # from prometheus_client import start_http_server
     # Start Prometheus metrics HTTP server on a unique port per DP rank
-    metrics_port = 8008 + data_parallel_rank    
-    start_http_server(metrics_port)
+    # metrics_port = 8008 + data_parallel_rank    
+    # start_http_server(metrics_port)
 
 
     # Send ready signal to parent process
