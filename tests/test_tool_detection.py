@@ -27,7 +27,7 @@ config = GRPOConfig(
     top_p=0.95,
     top_k=20,
     min_p=0.0,
-    max_completion_length=2048,
+    max_completion_length=32768,
     vllm_guided_decoding_regex=None,
     eos_token="<|im_end|>",
     result_token="</tool_response>",
@@ -55,7 +55,7 @@ for i, question in enumerate(questions):
     )
     # print(question)
     
-    output_path = "/alloc/s1-tool/s1_tool/tools/jsonl/qwen3_output_5_12.json"
+    output_path = "/workspace/s1-tool/s1_tool/tools/jsonl/qwen3_output_5_12.json"
 
     input_arg = {
         "question": question,
