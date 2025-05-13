@@ -28,8 +28,8 @@ from .scripts.sft import make_parser as make_sft_parser
 from .scripts.utils import TrlParser
 from .scripts.vllm_serve import main as vllm_serve_main
 from .scripts.vllm_serve import make_parser as make_vllm_serve_parser
-from .scripts.async_vllm_serve_v1 import main as async_vllm_serve_main
-from .scripts.async_vllm_serve_v1 import make_parser as make_async_vllm_serve_parser
+from .scripts.async_vllm_serve import main as async_vllm_serve_main
+from .scripts.async_vllm_serve import make_parser as make_async_vllm_serve_parser
 
 
 def main():

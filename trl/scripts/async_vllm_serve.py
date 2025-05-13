@@ -393,6 +393,8 @@ def chunk_list(lst: list, n: int) -> list[list]:
 
 
 def main(script_args: ScriptArguments):
+    envs.VLLM_USE_V1 = False
+    
     if not is_fastapi_available():
         raise ImportError(
             "FastAPI is required to run the vLLM serve script. Please install it using `pip install fastapi`."
@@ -641,7 +643,7 @@ def main(script_args: ScriptArguments):
         # The function update_named_param is called this way: update_named_param("name", torch.float32, (10, 10))
         # So with collective_rpc we need to call it this way:
         # llm.collective_rpc("update_named_param", args=("name", torch.float32, (10, 10)))
-        dtype = torch.__getattribute__(request.dtype.split(".")[-1])
+        # dtype = torch.__getattribute__(request.dtype.split(".")[-1])
 
         kwargs = {"method": "update_named_param", "args": (request.name, dtype, tuple(request.shape))}
         for connection in connections:
