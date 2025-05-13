@@ -309,7 +309,7 @@ def _generate_with_tool(
             # else:
             #     context = context[:last_tool_index] + "\n<|im_start|>result\n" + execution_result + "\n<|im_start|>continue\n"
 
-        elif tool_type == "retrieval":
+        elif tool_type == "retrieval" or tool_type == "retrieve":
             query = detect_result["tool_argument"]
             tool_start = time.time()
             try:
