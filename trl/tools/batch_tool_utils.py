@@ -164,15 +164,7 @@ def batch_generate_with_tool(
             # 3. Termination: no tool call OR ran out of budget
             # ------------------------------------------------------------------
             if not detect["tool_use"] or tokens_left[global_i] <= 0:
-                contexts[global_i] += "\n**Final Answer**\n"
-                # one more short call to get the final answer
-                _, final_answer = _make_tool_inference_requests_batch(
-                    [contexts[global_i]],
-                    max_tokens=512,
-                    args=args,
-                    stop=[args.eos_token],
-                )
-                contexts[global_i] += final_answer[0] + f"\n{args.eos_token}"
+                contexts[global_i] += "\n</think>\n**Final Answer**\n"
                 done[global_i] = True
                 continue
 
@@ -210,5 +202,15 @@ def batch_generate_with_tool(
                 )
 
             # After tool response we go for another generation pass (not done)
+            
+    # one more short call to get the final answer
+    _, final_answer = _make_tool_inference_requests_batch(
+        contexts,
+        max_tokens=512,
+        args=args,
+        stop=[args.eos_token],
+    )
+    for i in range(len(contexts)):
+        contexts[i] += final_answer[i] + f"\n{args.eos_token}"
 
     return contexts, stats
