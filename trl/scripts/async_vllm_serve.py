@@ -22,6 +22,7 @@ import multiprocessing as mp
 from collections.abc import Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
+from functools import partial
 from itertools import chain
 from multiprocessing import Pipe, Process
 from multiprocessing.connection import Connection
@@ -340,12 +341,37 @@ async def async_llm_worker(
         for attr in attr_path.split("."):
             obj = getattr(obj, attr)
         return obj
+    
+    async def handle_generate(conn: Connection, request_id: str, method, args: list, kwargs: dict):
+        results_generator = method(*args, **kwargs)
+        # try:
+        #     async for request_output in results_generator:
+        #         # request_output is yielded like [token1], [token1, token2], ...
+        #         result = request_output
+        # except asyncio.CancelledError:
+        #     return Response(status_code=499)
+        try:
+            async for request_output in results_generator:
+                # request_output is yielded like [token1], [token1, token2], ...
+                result = request_output
+        except Exception as e:
+            await asyncio.to_thread(conn.send, {"id": request_id, "error": str(e)})
+            
+        await asyncio.to_thread(conn.send, {"id": request_id, "result": result})
+
+    async def handle_generic(conn: Connection, request_id: str, method, args: list, kwargs: dict):
+        try:
+            result = await method(*args, **kwargs)
+            await asyncio.to_thread(conn.send, {"id": request_id, "result": result})
+        except Exception as e:
+            await asyncio.to_thread(conn.send, {"id": request_id, "error": str(e)})
 
 
     while True:
         # Wait for commands from the parent process
         try:
-            command = connection.recv()
+            # command = connection.recv()
+            command = await asyncio.to_thread(connection.recv)
         except KeyboardInterrupt:
             llm.engine_core.collective_rpc_async(method="close_communicator")
             break
@@ -356,22 +382,17 @@ async def async_llm_worker(
             args, kwargs = command.get("args", ()), command.get("kwargs", {})
 
             method = get_nested_attr(llm, method_name)
+            req_id = kwargs["request_id"]
 
             if method == llm.generate:
-                results_generator = method(*args, **kwargs)
-                result = []
-                try:
-                    async for request_output in results_generator:
-                        # request_output is yielded like [token1], [token1, token2], ...
-                        result = request_output
-                except asyncio.CancelledError:
-                    return Response(status_code=499)
+                asyncio.create_task(handle_generate(connection, req_id, method, args, kwargs))
                 
             else:
-                result = await method(*args, **kwargs)
+                # result = await method(*args, **kwargs)
+                asyncio.create_task(handle_generic(connection, req_id, method, args, kwargs))
             
-            if command["type"] == "call":
-                connection.send(result)
+            # if command["type"] == "call":
+            #     connection.send(result)
         elif command["type"] == "shutdown":
             break
 
@@ -449,6 +470,8 @@ def main(script_args: ScriptArguments):
                 process.join()  # ensure process termination after calling terminate()
 
     app = FastAPI(lifespan=lifespan)
+    
+    pending_requests: dict[str, asyncio.Future] = {}
 
     # Define the endpoints for the model server
     @app.get("/health/")
@@ -515,6 +538,7 @@ def main(script_args: ScriptArguments):
         {"completion_ids": [[101, 102, 103], [201, 202, 203]]}
         ```
         """
+        nonlocal connection_to_send, pending_requests
 
         # Guided decoding, if enabled
         if request.guided_decoding_regex is not None:
@@ -534,9 +558,10 @@ def main(script_args: ScriptArguments):
             guided_decoding=guided_decoding,
             stop=request.stop,
         )
-        request_id = random_uuid()        
+        request_id = random_uuid()
 
         # batched generation, non-tool-use
+        # TODO: haven't debugged this
         if len(request.prompts) > 1:
             # Evenly distribute prompts across DP ranks
             chunked_prompts = chunk_list(request.prompts, script_args.data_parallel_size)
@@ -553,7 +578,6 @@ def main(script_args: ScriptArguments):
                     kwargs = {"prompt": prompt, "sampling_params": sampling_params}
                     connection.send({"type": "call", "method": "generate", "kwargs": kwargs})
 
-            # TODO: haven't debugged this if
             # Receive results
             all_outputs = [connection.recv() for connection in connections]
 
@@ -568,17 +592,19 @@ def main(script_args: ScriptArguments):
         # 1 prompt in each request, tool-use case
         else:
             kwargs = {"prompt": request.prompts[0], "sampling_params": sampling_params, "request_id": request_id}
-            nonlocal connection_to_send
-            connection = connections[connection_to_send]
+            connection: Connection = connections[connection_to_send]
             connection_to_send = (connection_to_send + 1) % script_args.data_parallel_size
-            connection.send({"type": "call", "method": "generate", "kwargs": kwargs})
+            # connection.send({"type": "call", "method": "generate", "kwargs": kwargs})
+            loop = asyncio.get_running_loop()
+            future = loop.create_future()
+            pending_requests[request_id] = future
+            await loop.run_in_executor(None, partial(connection.send, {"type": "call", "method": "generate", "kwargs": kwargs}))
             
             print("sending connection!", kwargs)
-            # all_outputs: List[RequestOutput] = connection.recv()
 
-            all_outputs: RequestOutput = connection.recv()
-            # completion_ids = [list(output.token_ids) for outputs in all_outputs for output in outputs.outputs]
-            # completion_text = [output.text for outputs in all_outputs for output in outputs.outputs]
+            # all_outputs: RequestOutput = connection.recv()
+            # all_outputs: RequestOutput = await loop.run_in_executor(None, connection.recv)
+            all_outputs: RequestOutput = await future
             
             completion_ids = [list(all_outputs.outputs[0].token_ids)]
             completion_text = [all_outputs.outputs[0].text]
@@ -643,7 +669,7 @@ def main(script_args: ScriptArguments):
         # The function update_named_param is called this way: update_named_param("name", torch.float32, (10, 10))
         # So with collective_rpc we need to call it this way:
         # llm.collective_rpc("update_named_param", args=("name", torch.float32, (10, 10)))
-        # dtype = torch.__getattribute__(request.dtype.split(".")[-1])
+        dtype = torch.__getattribute__(request.dtype.split(".")[-1])
 
         kwargs = {"method": "update_named_param", "args": (request.name, dtype, tuple(request.shape))}
         for connection in connections:
@@ -683,8 +709,6 @@ def main(script_args: ScriptArguments):
 
     # Start the server
     uvicorn.run(app, host=script_args.host, port=script_args.port, log_level=script_args.log_level)
-#         await llm.engine_core.collective_rpc_async("close_communicator")
-#         return {"message": "Request received, closing communicator"}
 
 
 

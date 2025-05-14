@@ -496,6 +496,13 @@ class GRPOConfig(TrainingArguments):
             "`<python> <result> <continue> <|Assistant|> <|end_of_sentence|>`."
         },
     )
+    
+    tool_tokens: list[str] = field(
+        default_factory=lambda: ["<tool_call>", "</tool_call>"],
+        metadata={
+            "help": "Tokens that enclose tool calling arguments",
+        },
+    )
         
     
     python_token: str = field(

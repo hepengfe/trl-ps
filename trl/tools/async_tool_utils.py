@@ -92,7 +92,7 @@ You are provided with function signatures within <tools></tools> XML tags:
 <tools>
 {{"type":"function","function":{{"name":"retrieval","description":"Used to verify factual information or retrieve up-to-date external content via a search engine. This tool ensures factual accuracy by accessing web-based data sources.","parameters":{{"type":"object","properties":{{"query":{{"type":"string","description":"The search query or question to be retrieved from the web."}}}},"required":["query"]}}}}}}
 {{"type":"function","function":{{"name":"python","description":"Used for performing calculations, debugging code, or validating intermediate results through Python execution. Ensures correctness for all non-trivial quantitative or logical steps.","parameters":{{"type":"object","properties":{{"code":{{"type":"string","description":"A concise Python code snippet to execute. Must be self-contained and return the desired output."}}}},"required":["code"]}}}}}}
-{{"type":"function","function":{{"name":"saving","description":"Used to replace previous reasoning with a concise summary when the prior thinking is too lengthy. This tool ensures the assistant remains focused and avoids unnecessary verbosity.","parameters":{{"type":"object","properties":{{}},"required":[]}}}}}}
+{{"type":"function","function":{{"name":"saving","description":"Used to replace previous reasoning with a concise summary when the prior thinking is too lengthy. This tool ensures the assistant remains focused and avoids unnecessary verbosity.","parameters":{{"type":"object","properties":{{"summary":{{"type":"string","description":"Summarization of all previous thinking trajectory"}}}},"required":["summary"]}}}}}}
 </tools>
 
 For each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:
@@ -177,7 +177,8 @@ def _detect_tool_use(context: str, prompt_idx: int, tokens_left: int, args: GRPO
     if start != -1 and last_response_idx != -1:
         return result
     
-    # TODO: tool call is not at the end of the generation, ignore?
+    # If </tool_call> is not at the end of the generation because of vllm stop
+    # then end = -1
     
     try:
         tool_call_raw = generated[start + len(start_tag):end].strip()
@@ -234,11 +235,12 @@ def _generate_with_tool(
     
     while True:
         gen_start = time.time()
+        # TODO: change this to streaming
         completion_ids, completion_text = _make_tool_inference_requests(
                 prompt=context,
                 max_tokens=tokens_left,
                 args=args,
-                stop=[args.result_token, args.eos_token],
+                stop=[args.tool_tokens[0], args.eos_token],
             )
         completion_ids = completion_ids[0]
         completion_text = completion_text[0]
@@ -286,12 +288,9 @@ def _generate_with_tool(
             tool_duration = time.time() - tool_start
             print(f"[Time] Python tool call took {tool_duration:.2f} seconds")
 
-            last_tool_index = context.rfind(args.python_token)
-            # TODO: fix this
-            # if new_code:
-            #     context = context[:last_tool_index] + new_code + "\n<|im_start|>result\n" + execution_result + "\n<|im_start|>continue\n"
-            # else:
-            #     context = context[:last_tool_index] + "\n<|im_start|>result\n" + execution_result + "\n<|im_start|>continue\n"
+            # inserting the result between <tool_response> and </tool_response>
+            context = context + "\n<tool_response>\n" + execution_result + "\n</tool_response>\n"
+
 
         elif tool_type == "retrieval" or tool_type == "retrieve":
             query = detect_result["tool_argument"]
@@ -309,15 +308,14 @@ def _generate_with_tool(
             tool_duration = time.time() - tool_start
             print(f"[Time] Retrieval tool call took {tool_duration:.2f} seconds")
 
-            result_index = context.rfind(args.result_token)
-            context = context[:result_index + len(args.result_token)] + result_text + "\n<|im_start|>continue\n"
+            # TODO: fix this
+            context = context + result_text + "\n<|im_start|>continue\n"
 
         elif tool_type == "saving":
-            start_idx, end_idx, extracted = detect_result["tool_argument"]
+            # replace previous thinking with summary in the tool call argument
+            extracted = detect_result["tool_argument"]
             print(f"[INFO] Detected saving block: {extracted}")
-            context = context[:prompt_idx + start_idx] + extracted + context[prompt_idx + end_idx:]
-            # Resume generation right after saving
-            context += "\n<|im_start|>continue\n"
+            context = context[:prompt_idx] + f"\n{args.saving_tokens[0]}\n" + extracted + f"\n{args.saving_tokens[1]}\n"
             
 
     total_duration = time.time() - start_total_time
@@ -334,7 +332,7 @@ def generate_with_tool_safe(input_argument: dict) -> str:
     question = input_argument['question']
     args = input_argument['args']
     try:
-        return _generate_with_tool(question, args)
+        return question, _generate_with_tool(question, args)
     except Exception as e:
         import traceback
         print(f"[ERROR] Exception for question:\n{question}\n")
