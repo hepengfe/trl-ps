@@ -107,6 +107,8 @@ def generate_with_tool_batch(
     """
     N = len(prompts)
     contexts: List[str] = prompts[:]  # running transcripts
+    prompts_len = [len(prompt) for prompt in prompts]
+    contexts_to_return: List[str] = [] # adding intermediate savings
     tokens_left = [args.max_completion_length] * N
     done = [False] * N
 
@@ -193,8 +195,9 @@ def generate_with_tool_batch(
                 stats[global_i]["num_saving"] += 1
                 summary = detect["tool_argument"]
                 # Replace everything since last user turn with the summary
+                contexts_to_return.append(contexts[global_i])
                 contexts[global_i] = (
-                    contexts[global_i][: detect["tool_argument_start"]]
+                    contexts[global_i][: prompts_len[global_i]]
                     + f"\n{args.saving_tokens[0]}\n"
                     + summary
                     + f"\n{args.saving_tokens[1]}\n"
@@ -210,4 +213,6 @@ def generate_with_tool_batch(
     for i in range(len(contexts)):
         contexts[i] += final_answer[i] + f"\n{args.eos_token}"
 
-    return contexts, stats
+    contexts_to_return.extend(contexts)
+    
+    return contexts_to_return, stats

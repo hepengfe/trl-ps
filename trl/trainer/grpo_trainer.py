@@ -693,18 +693,21 @@ class GRPOTrainer(Trainer):
                 raise ValueError(
                     f"Invalid tool format: {args.tool_format}. Supported formats are 'qwen' and 'deepseek'."
                 )
-                
+            
+            # Qwen3's tokenizers has tool tokens. If not using Qwen3, need to manually add these tokens 
             if self.tool_use:
                 # Ensure tokenizer knows the delimiters so we can recognise them by id
-                special = [args.result_token, args.continue_token]
+                special = args.result_tokens + args.tool_tokens
                 added = [tok for tok in special
                         if self.processing_class.convert_tokens_to_ids(tok) is None]
+                assert added is None, f"Token list {added} is not in the tokenizer."
+                
                 if added:                              # add if not already present
                     self.processing_class.add_tokens(added, special_tokens=True)
                     self.model.resize_token_embeddings(len(self.processing_class))
                 # Cache their ids for quick lookup later
-                self._tool_start_id = self.processing_class.convert_tokens_to_ids(args.result_token)
-                self._tool_end_id   = self.processing_class.convert_tokens_to_ids(args.continue_token)
+                self._tool_start_id = self.processing_class.convert_tokens_to_ids(args.tool_tokens[0])
+                self._tool_end_id   = self.processing_class.convert_tokens_to_ids(args.tool_tokens[1])
 
                 
 
@@ -1037,10 +1040,39 @@ class GRPOTrainer(Trainer):
         """
         A helper function for tool inference.
         """
+        #TODO: check if questions need templating
         if self.args.async_infer:
             return generate_with_tool_async(questions, self.args)
         else:
             return generate_with_tool_batch(questions, self.args)
+        
+    def _build_tool_mask(self, comp_ids: torch.Tensor) -> torch.Tensor:
+        """
+        Returns an int mask of shape (B, C) with 1s on tokens *outside*
+        <tool_response> … </tool_response> blocks and 0s inside them.
+        """
+        if not self.tool_use:
+            return torch.ones_like(comp_ids, dtype=torch.int)
+
+        start_id, end_id = self._tool_start_id, self._tool_end_id
+        mask = torch.ones_like(comp_ids, dtype=torch.int)
+
+        # Scan each sequence once; sequences are short so Python loop is fine.
+        for i in range(comp_ids.size(0)):
+            seq = comp_ids[i]
+            starts = (seq == start_id).nonzero(as_tuple=True)[0]
+            ends   = (seq == end_id).nonzero(as_tuple=True)[0]
+            if not len(starts) or not len(ends):
+                continue                     # no tool span
+            end_ptr = 0
+            for s in starts:
+                e_candidates = ends[ends > s]
+                if not len(e_candidates):
+                    break                    # malformed, ignore
+                e = e_candidates[0]
+                mask[i, s:e + 1] = 0         # zero-out [<tool>, …, </tool>]
+                end_ptr = e + 1
+        return mask
 
 
     def _generate_and_score_completions(
@@ -1093,7 +1125,7 @@ class GRPOTrainer(Trainer):
                         all_prompts_text = gather_object(prompts_text)
                         if self.accelerator.is_main_process:
                             with profiling_context(self, "vLLM.generate"):
-                                completion_ids, num_tool_use = self._generate_with_tool_batch_parallel(all_prompts_text, 20)
+                                completion_ids, num_tool_use = self._generate_with_tool(all_prompts_text, 20)
                     
                     
                 else:
@@ -1177,6 +1209,10 @@ class GRPOTrainer(Trainer):
         eos_idx[is_eos.any(dim=1)] = is_eos.int().argmax(dim=1)[is_eos.any(dim=1)]
         sequence_indices = torch.arange(is_eos.size(1), device=device).expand(is_eos.size(0), -1)
         completion_mask = (sequence_indices <= eos_idx.unsqueeze(1)).int()
+        
+        if self.tool_use:
+            tool_mask = self._build_tool_mask(completion_ids)
+            completion_mask = completion_mask * tool_mask
 
         # If mask_truncated_completions is enabled, zero out truncated completions in completion_mask
         if self.mask_truncated_completions:

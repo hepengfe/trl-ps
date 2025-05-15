@@ -513,21 +513,21 @@ class GRPOConfig(TrainingArguments):
     )
         
     
-    python_token: str = field(
-        default="<python>",
-        metadata={
-            "help": "Python interpreter token to be detected during tool inference. If detected, "
-            "will call python interpreter and append results back into the thinking trajectory"
-        },
-    )
+    # python_token: str = field(
+    #     default="<python>",
+    #     metadata={
+    #         "help": "Python interpreter token to be detected during tool inference. If detected, "
+    #         "will call python interpreter and append results back into the thinking trajectory"
+    #     },
+    # )
     
-    retrieval_token: str = field(
-        default="<retrieval>",
-        metadata={
-            "help": "Retrieval token to be detected during tool inference. If detected, "
-            "will call google retrieval and append results back into the thinking trajectory"
-        },
-    )
+    # retrieval_token: str = field(
+    #     default="<retrieval>",
+    #     metadata={
+    #         "help": "Retrieval token to be detected during tool inference. If detected, "
+    #         "will call google retrieval and append results back into the thinking trajectory"
+    #     },
+    # )
     
     saving_tokens: list[str] = field(
         default_factory=lambda: ["<save>", "</save>"],
@@ -537,20 +537,20 @@ class GRPOConfig(TrainingArguments):
         },
     )
     
-    result_token: str = field(
-        default="<result>",
+    result_tokens: list[str] = field(
+        default_factory=lambda: ["<tool_response>", "</tool_response>"],
         metadata={
-            "help": "Result token to be detected during tool inference. If detected, "
-            "will append tool use results after the result token"
+            "help": "Result tokens for tool inference."
+            "Will append tool use results after the result token"
         },
     )
     
-    continue_token: str = field(
-        default="<continue>",
-        metadata={
-            "help": "Continue token for tool inference. Model will resume thinking after this token. "
-        },
-    )
+    # continue_token: str = field(
+    #     default="<continue>",
+    #     metadata={
+    #         "help": "Continue token for tool inference. Model will resume thinking after this token. "
+    #     },
+    # )
     
     assistant_token: str = field(
         default="<｜Assistant｜>",
