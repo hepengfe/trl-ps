@@ -39,7 +39,7 @@ from .python_and_retriever import (
 )
 from ..trainer.grpo_config import GRPOConfig
 from .python_and_retriever import google_retriever,python_interpreter, remove_python_prefix
-from .async_tool_utils import SYSTEM_PROMPT, _detect_tool_use
+from .async_tool_utils import _detect_tool_use
 
 ################################################################################
 # vLLM helpers

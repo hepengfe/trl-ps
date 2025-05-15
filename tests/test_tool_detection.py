@@ -1,11 +1,31 @@
 import json
 from datasets import load_dataset
 from trl.trainer.grpo_config import GRPOConfig
-from trl.tools.async_tool_utils import generate_with_tool_async, SYSTEM_PROMPT, _generate_with_tool_safe
+from trl.tools.async_tool_utils import generate_with_tool_async, _generate_with_tool_safe
 from trl.tools.batch_tool_utils import generate_with_tool_batch
 import random
 from tqdm import tqdm
 import multiprocessing
+
+SYSTEM_PROMPT =  f"""
+# Tools
+
+You may call one or more functions to assist with the user query.
+
+You are provided with function signatures within <tools></tools> XML tags:
+<tools>
+{{"type":"function","function":{{"name":"retrieval","description":"Used to verify factual information or retrieve up-to-date external content via a search engine. This tool ensures factual accuracy by accessing web-based data sources.","parameters":{{"type":"object","properties":{{"query":{{"type":"string","description":"The search query or question to be retrieved from the web."}}}},"required":["query"]}}}}}}
+{{"type":"function","function":{{"name":"python","description":"Used for performing calculations, debugging code, or validating intermediate results through Python execution. Ensures correctness for all non-trivial quantitative or logical steps.","parameters":{{"type":"object","properties":{{"code":{{"type":"string","description":"A concise Python code snippet to execute. Must be self-contained and return the desired output."}}}},"required":["code"]}}}}}}
+{{"type":"function","function":{{"name":"saving","description":"Used to replace previous reasoning with a concise summary when the prior thinking is too lengthy. This tool ensures the assistant remains focused and avoids unnecessary verbosity.","parameters":{{"type":"object","properties":{{"summary":{{"type":"string","description":"Summarization of all previous thinking trajectory"}}}},"required":["summary"]}}}}}}
+</tools>
+
+For each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:
+<tool_call>
+{{"name": <function-name>, "arguments": <args-json-object>}}
+</tool_call>
+
+- The final answer must be enclosed within LaTeX using `\\boxed{{}}` immediately after the **Final Answer** header.
+"""
 
 
 output_path = "/workspace/s1-tool/s1_tool/tools/jsonl/qwen3_output_5_13.json"

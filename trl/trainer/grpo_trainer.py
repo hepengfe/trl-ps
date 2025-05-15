@@ -1082,6 +1082,9 @@ class GRPOTrainer(Trainer):
         mode = "train" if self.model.training else "eval"
 
         prompts = [x["prompt"] for x in inputs]
+        print(prompts)
+        import sys
+        sys.exit(1)
         prompts_text = [maybe_apply_chat_template(example, self.processing_class)["prompt"] for example in inputs]
         prompt_inputs = self.processing_class(
             text=prompts_text, return_tensors="pt", padding=True, padding_side="left", add_special_tokens=False
@@ -1133,14 +1136,16 @@ class GRPOTrainer(Trainer):
                 # Broadcast the completions from the main process to all processes, ensuring each process receives its
                 # corresponding slice.
                 completion_ids = broadcast_object_list(completion_ids, from_process=0)
+                # Due to saving, len(completion_ids) >= len(prompts)
                 process_slice = slice(
-                    self.accelerator.process_index * len(prompts),
-                    (self.accelerator.process_index + 1) * len(prompts),
+                    self.accelerator.process_index * len(completion_ids),
+                    (self.accelerator.process_index + 1) * len(completion_ids),
                 )
                 completion_ids = completion_ids[process_slice]
 
             # Generate completions using colocated vLLM instances: each device holds vLLM copy and work on their own batch of prompts
             elif self.vllm_mode == "colocate":
+                assert self.tool_use is False, "Tool use is not supported in colocate mode"
                 if self.guided_decoding_regex:
                     guided_decoding = GuidedDecodingParams(backend="outlines", regex=self.guided_decoding_regex)
                 else:
