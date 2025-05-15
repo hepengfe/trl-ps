@@ -85,7 +85,7 @@ def _make_tool_inference_requests_batch(
 ################################################################################
 
 
-def batch_generate_with_tool(
+def generate_with_tool_batch(
     prompts: List[str],
     args: GRPOConfig,
 ) -> Tuple[List[str], List[Dict[str, int]]]:
@@ -110,7 +110,6 @@ def batch_generate_with_tool(
     tokens_left = [args.max_completion_length] * N
     done = [False] * N
 
-    # simple counters
     stats = [
         {
             "generated_tokens": 0,
@@ -200,8 +199,6 @@ def batch_generate_with_tool(
                     + summary
                     + f"\n{args.saving_tokens[1]}\n"
                 )
-
-            # After tool response we go for another generation pass (not done)
             
     # one more short call to get the final answer
     _, final_answer = _make_tool_inference_requests_batch(

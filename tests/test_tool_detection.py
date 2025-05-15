@@ -1,8 +1,8 @@
 import json
 from datasets import load_dataset
 from trl.trainer.grpo_config import GRPOConfig
-from trl.tools.async_tool_utils import generate_with_tool_safe, SYSTEM_PROMPT
-from trl.tools.batch_tool_utils import batch_generate_with_tool
+from trl.tools.async_tool_utils import generate_with_tool_async, SYSTEM_PROMPT, _generate_with_tool_safe
+from trl.tools.batch_tool_utils import generate_with_tool_batch
 import random
 from tqdm import tqdm
 import multiprocessing
@@ -10,39 +10,6 @@ import multiprocessing
 
 output_path = "/workspace/s1-tool/s1_tool/tools/jsonl/qwen3_output_5_13.json"
 
-
-def _generate_with_tool_batch_parallel(questions: list, args: GRPOConfig, max_processes: int = 20) -> list:
-    """
-    Batch inference - Parallel version using multiprocessing.
-    Maintains a pool of `max_processes` workers and processes questions as workers free up.
-    """
-    bar = tqdm(total=len(questions))
-    results = []
-    
-    input_arguments = [
-        {
-            "question": questions[i],
-            "args": args,
-        } for i in range(len(questions))
-    ]
-    
-    with multiprocessing.Pool(processes=max_processes) as pool:
-        for question, output, tool_stats in pool.imap(generate_with_tool_safe, input_arguments):
-            results.append({
-                "system_prompt": SYSTEM_PROMPT,
-                "question": question,
-                "output": output,
-                "tool_stats": tool_stats
-            })
-            bar.update(1)
-            
-    with open(output_path, "w") as f:
-        json.dump(results, f, indent=4)
-        
-    dataset = load_dataset("json", data_files=output_path, split="train")
-    dataset.push_to_hub("ryzax/qwen3_output_new")
-            
-    return results
 
 # Load a small number of test samples
 # dataset = load_dataset("simplescaling/aime24_nofigures", split="train[:3]")  # only 3 for quick test
@@ -82,7 +49,13 @@ batch = True
 
 
 if parallel:
-    _generate_with_tool_batch_parallel(questions, config)
+    results = generate_with_tool_async(questions, config)
+    
+    with open(output_path, "w") as f:
+        json.dump(results, f, indent=4)
+        
+    dataset = load_dataset("json", data_files=output_path, split="train")
+    dataset.push_to_hub("ryzax/qwen3_output_new")
     
 elif batch:
     assert parallel == False
@@ -101,7 +74,7 @@ elif batch:
         )
         prompts.append(question)
         
-    contexts, stats = batch_generate_with_tool(prompts, config)
+    contexts, stats = generate_with_tool_batch(prompts, config)
     
     for (context, stat) in zip(contexts, stats):
         results.append({
@@ -140,7 +113,7 @@ else:
             "args": config
         }
         try:
-            question, output, tool_stats = generate_with_tool_safe(input_arg)
+            question, output, tool_stats = _generate_with_tool_safe(input_arg)
             results.append({
                 "system_prompt": SYSTEM_PROMPT,
                 "question": question,

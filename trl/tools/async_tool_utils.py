@@ -3,6 +3,7 @@ import requests
 import time
 from tqdm import tqdm
 import trl
+import multiprocessing
 
 from typing import Any, Dict, List, Optional, Union, Tuple
 
@@ -327,7 +328,7 @@ def _generate_with_tool(
     # return return_ids[0], tool_use_stat
     return context, tool_use_stat
 
-def generate_with_tool_safe(input_argument: dict) -> str:
+def _generate_with_tool_safe(input_argument: dict) -> str:
     
     question = input_argument['question']
     args = input_argument['args']
@@ -339,3 +340,31 @@ def generate_with_tool_safe(input_argument: dict) -> str:
         traceback.print_exc()
         return f"[ERROR] {str(e)}", False
 
+
+
+def generate_with_tool_async(questions: list, args: GRPOConfig, max_processes: int = 20) -> list:
+    """
+    Batch inference - Parallel version using multiprocessing.
+    Maintains a pool of `max_processes` workers and processes questions as workers free up.
+    """
+    bar = tqdm(total=len(questions))
+    results = []
+    
+    input_arguments = [
+        {
+            "question": questions[i],
+            "args": args,
+        } for i in range(len(questions))
+    ]
+    
+    with multiprocessing.Pool(processes=max_processes) as pool:
+        for question, output, tool_stats in pool.imap(_generate_with_tool_safe, input_arguments):
+            results.append({
+                "system_prompt": SYSTEM_PROMPT,
+                "question": question,
+                "output": output,
+                "tool_stats": tool_stats
+            })
+            bar.update(1)
+            
+    return results

@@ -66,7 +66,8 @@ from .utils import (
     print_prompt_completions_sample,
     selective_log_softmax,
 )
-from ..tools.async_tool_utils import generate_with_tool_safe
+from ..tools.async_tool_utils import generate_with_tool_async
+from ..tools.batch_tool_utils import generate_with_tool_batch
 
 if is_peft_available():
     from peft import PeftConfig, get_peft_model
@@ -687,11 +688,24 @@ class GRPOTrainer(Trainer):
                 args.result_token = "<tool_response>"
                 args.continue_token = "</tool_response>"
             elif args.tool_format == "deepseek":
-                from ..tools.async_tool_utils import _generate_with_tool_safe
+                from ..tools.batch_tool_utils import generate_with_tool
             else:
                 raise ValueError(
                     f"Invalid tool format: {args.tool_format}. Supported formats are 'qwen' and 'deepseek'."
                 )
+                
+            if self.tool_use:
+                # Ensure tokenizer knows the delimiters so we can recognise them by id
+                special = [args.result_token, args.continue_token]
+                added = [tok for tok in special
+                        if self.processing_class.convert_tokens_to_ids(tok) is None]
+                if added:                              # add if not already present
+                    self.processing_class.add_tokens(added, special_tokens=True)
+                    self.model.resize_token_embeddings(len(self.processing_class))
+                # Cache their ids for quick lookup later
+                self._tool_start_id = self.processing_class.convert_tokens_to_ids(args.result_token)
+                self._tool_end_id   = self.processing_class.convert_tokens_to_ids(args.continue_token)
+
                 
 
             # vLLM specific sampling arguments
@@ -1019,30 +1033,15 @@ class GRPOTrainer(Trainer):
             inputs = self._generate_and_score_completions(accumulated_local_batch)
         return inputs
 
-    def _generate_with_tool_batch_parallel(self, questions: list, max_processes: int = 20) -> list:
+    def _generate_with_tool(self, questions: list, max_processes: int = 20) -> list:
         """
-        Batch inference - Parallel version using multiprocessing.
-        Maintains a pool of `max_processes` workers and processes questions as workers free up.
+        A helper function for tool inference.
         """
-        bar = tqdm(total=len(questions))
-        results = []
-        num_tool_use = 0
-        
-        input_arguments = [
-            {
-                "question": questions[i],
-                "args": self.args
-            } for i in range(len(questions))
-        ]
-        
-        with multiprocessing.Pool(processes=max_processes) as pool:
-            for result, tool_use in pool.imap(generate_with_tool_safe, input_arguments):
-                # results.append(result)
-                if tool_use:
-                    num_tool_use += 1
-                results.append(result)
-                bar.update(1)
-        return results, num_tool_use
+        if self.args.async_infer:
+            return generate_with_tool_async(questions, self.args)
+        else:
+            return generate_with_tool_batch(questions, self.args)
+
 
     def _generate_and_score_completions(
         self, inputs: list[dict[str, Union[torch.Tensor, Any]]]

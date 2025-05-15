@@ -479,6 +479,14 @@ class GRPOConfig(TrainingArguments):
         },
     )
     
+    async_infer: bool = field(
+        default=False,
+        metadata={
+            "help": "Whether to use async inference for tool use in training."
+            "If set to False, will use batch inference."
+        },
+    )
+    
     saving: bool = field(
         default=False,
         metadata={
