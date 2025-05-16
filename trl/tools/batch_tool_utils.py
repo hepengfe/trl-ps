@@ -108,7 +108,9 @@ def generate_with_tool_batch(
     N = len(prompts)
     contexts: List[str] = prompts[:]  # running transcripts
     prompts_len = [len(prompt) for prompt in prompts]
-    contexts_to_return: List[str] = [] # adding intermediate savings
+    completions_to_return: List[str] = [] # adding intermediate savings
+    contexts_to_return: List[str] = []
+    prompts_to_return: List[str] = []
     tokens_left = [args.max_completion_length] * N
     done = [False] * N
 
@@ -194,8 +196,13 @@ def generate_with_tool_batch(
             elif tool_type == "saving":
                 stats[global_i]["num_saving"] += 1
                 summary = detect["tool_argument"]
-                # Replace everything since last user turn with the summary
+                
+                # bookkeep the old thinking & summary
                 contexts_to_return.append(contexts[global_i])
+                completions_to_return.append(contexts[global_i][prompts_len[global_i]:])
+                prompts_to_return.append(contexts[global_i][:prompts_len[global_i]])
+                
+                # Replace all old thinking with the summary
                 contexts[global_i] = (
                     contexts[global_i][: prompts_len[global_i]]
                     + f"\n{args.saving_tokens[0]}\n"
@@ -206,7 +213,7 @@ def generate_with_tool_batch(
     # one more short call to get the final answer
     _, final_answer = _make_tool_inference_requests_batch(
         contexts,
-        max_tokens=512,
+        max_tokens=128,
         args=args,
         stop=[args.eos_token],
     )
@@ -214,5 +221,98 @@ def generate_with_tool_batch(
         contexts[i] += final_answer[i] + f"\n{args.eos_token}"
 
     contexts_to_return.extend(contexts)
+    prompts_to_return.extend(prompts)
+    for i, context in enumerate(contexts):
+        completions_to_return.append(context[prompts_len[i]:])
     
-    return contexts_to_return, stats
+    
+    return contexts_to_return, completions_to_return, stats
+    
+    # return [prompts[0], prompts[1]], [example_output1, example_output2], stats
+
+
+
+
+
+example_output1 = """
+<think>
+Let me attempt a diagram and use triangle properties to compute AD². Since ABCD is cyclic, and ∠DBC is 15°, this may involve using extended Law of Sines or triangle similarity. I’ll first sketch the geometry to better visualize the problem.
+</think>
+<tool_call>
+{"name": "plot_geometry_diagram", "arguments": {"type": "cyclic_quadrilateral", "diagonal": 300, "angle_DBC_deg": 15, "radius": 100.0 * 3 ** 0.5}}
+</tool_call>
+<tool_response>
+{"image_url": "https://dummyimages.com/cyclic_quadrilateral_annotated.png"}
+</tool_response>
+<think>
+From the diagram, I can label the triangle ΔBDC and apply the Extended Law of Sines:  
+For triangle BDC, with R = 100√3 and ∠DBC = 15°, use:
+\[ \frac{BC}{\sin(\angle BDC)} = 2R \]
+We can reverse compute BC, then use triangle relationships to find AD.
+</think>
+<tool_call>
+{"name": "compute_extended_law_of_sines", "arguments": {"R": 100 * (3)**0.5, "angle_deg": 15}}
+</tool_call>
+<tool_response>
+{"result": 200.0}
+</tool_response>
+<think>
+So BC = 200. Let’s now use the Cosine Law in triangle ADC using known sides and angles.
+</think>
+<tool_call>
+{"name": "cosine_law_solver", "arguments": {"side1": 300, "side2": 200, "angle_deg": 120}}
+</tool_call>
+<tool_response>
+{"result": 519.6152422706632}
+</tool_response>
+**Final Answer**
+\boxed{270000}
+
+**Step-by-Step Explanation:**
+1. Drew a diagram of the cyclic quadrilateral.
+2. Used Extended Law of Sines in ΔBDC to find BC = 200.
+3. Applied Cosine Law to triangle ADC.
+4. Found that AD ≈ 519.6, hence AD² ≈ 270000.
+<|im_end|>
+"""
+
+
+example_output2 = """
+<think>
+To solve for the maximum height, we need the vertical component of velocity and apply the formula:
+\[ h = \frac{v_y^2}{2g} \]
+Let’s compute the vertical component first.
+</think>
+<tool_call>
+{"name": "decompose_velocity", "arguments": {"velocity": 60, "angle_deg": 30}}
+</tool_call>
+<tool_response>
+{"vx": 51.9615, "vy": 30.0}
+</tool_response>
+<think>
+Vertical velocity is 30 m/s. Now calculate the maximum height.
+</think>
+<tool_call>
+{"name": "compute_max_height", "arguments": {"vy": 30.0, "g": 9.8}}
+</tool_call>
+<tool_response>
+{"result": 45.91836734693877}
+</tool_response>
+<think>
+The maximum height is approximately 45.92 meters. I’ll cross-verify this with a physics knowledge source.
+</think>
+<tool_call>
+{"name": "google_retriever", "arguments": {"query": "maximum height of projectile formula physics"}}
+</tool_call>
+<tool_response>
+{"summary": "The maximum height of a projectile is given by h = (v_y^2) / (2g), where v_y is the initial vertical velocity and g is the acceleration due to gravity."}
+</tool_response>
+**Final Answer**
+\boxed{45.92\ \text{m}}
+
+**Step-by-Step:**
+1. Vertical component: \(v_y = 60 \sin(30^\circ) = 30\ \text{m/s}\)
+2. Applied height formula: \(h = \frac{30^2}{2 \cdot 9.8} ≈ 45.92\ \text{m}\)
+3. Verified with external source.
+<|im_end|>
+"""

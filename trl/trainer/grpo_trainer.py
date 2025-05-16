@@ -700,9 +700,9 @@ class GRPOTrainer(Trainer):
                 special = args.result_tokens + args.tool_tokens
                 added = [tok for tok in special
                         if self.processing_class.convert_tokens_to_ids(tok) is None]
-                assert added is None, f"Token list {added} is not in the tokenizer."
+                assert len(added) == 0, f"Token list {added} is not in the tokenizer."
                 
-                if added:                              # add if not already present
+                if len(added) > 0:                              # add if not already present
                     self.processing_class.add_tokens(added, special_tokens=True)
                     self.model.resize_token_embeddings(len(self.processing_class))
                 # Cache their ids for quick lookup later
@@ -1050,11 +1050,18 @@ class GRPOTrainer(Trainer):
         """
         Returns an int mask of shape (B, C) with 1s on tokens *outside*
         <tool_response> … </tool_response> blocks and 0s inside them.
+        Used to leave certain tokens out for loss calculation.
         """
-        if not self.tool_use:
-            return torch.ones_like(comp_ids, dtype=torch.int)
+        device = self.accelerator.device
+        start_id = torch.tensor(
+            self.processing_class.encode(self.args.result_tokens[0], add_special_tokens=False),
+            device=device
+        )
+        end_id = torch.tensor(
+            self.processing_class.encode(self.args.result_tokens[1], add_special_tokens=False),
+            device=device
+        )
 
-        start_id, end_id = self._tool_start_id, self._tool_end_id
         mask = torch.ones_like(comp_ids, dtype=torch.int)
 
         # Scan each sequence once; sequences are short so Python loop is fine.
@@ -1064,14 +1071,12 @@ class GRPOTrainer(Trainer):
             ends   = (seq == end_id).nonzero(as_tuple=True)[0]
             if not len(starts) or not len(ends):
                 continue                     # no tool span
-            end_ptr = 0
             for s in starts:
                 e_candidates = ends[ends > s]
                 if not len(e_candidates):
                     break                    # malformed, ignore
                 e = e_candidates[0]
-                mask[i, s:e + 1] = 0         # zero-out [<tool>, …, </tool>]
-                end_ptr = e + 1
+                mask[i, s:e + 1] = 0         # zero-out [<tool_response>, …, </tool_response>]
         return mask
 
 
@@ -1082,10 +1087,8 @@ class GRPOTrainer(Trainer):
         mode = "train" if self.model.training else "eval"
 
         prompts = [x["prompt"] for x in inputs]
-        print(prompts)
-        import sys
-        sys.exit(1)
         prompts_text = [maybe_apply_chat_template(example, self.processing_class)["prompt"] for example in inputs]
+        
         prompt_inputs = self.processing_class(
             text=prompts_text, return_tensors="pt", padding=True, padding_side="left", add_special_tokens=False
         )
@@ -1125,18 +1128,31 @@ class GRPOTrainer(Trainer):
                                 guided_decoding_regex=self.guided_decoding_regex,
                             )
                     else:
+                        # tool inference using vllm
                         all_prompts_text = gather_object(prompts_text)
                         if self.accelerator.is_main_process:
                             with profiling_context(self, "vLLM.generate"):
-                                completion_ids, num_tool_use = self._generate_with_tool(all_prompts_text, 20)
-                    
+                                prompts, completions, tool_stats = self._generate_with_tool(all_prompts_text, 20)
+                                
+                            completion_ids = self.processing_class(
+                                text=completions
+                            )["input_ids"]
+                            completion_ids = [torch.tensor(ids, device=device) for ids in completion_ids]
+                            completion_ids = pad(completion_ids, padding_value=self.processing_class.pad_token_id)
+
+                            # update prompts here according to savings
+                            prompt_ids = self.processing_class(
+                                text=prompts, return_tensors="pt", padding=True, padding_side="left", add_special_tokens=False
+                            )
+                            prompt_ids, prompt_mask = prompt_ids["input_ids"].to(device), prompt_ids["attention_mask"].to(device)
+
                     
                 else:
                     completion_ids = [None] * len(all_prompts_text)
                 # Broadcast the completions from the main process to all processes, ensuring each process receives its
                 # corresponding slice.
                 completion_ids = broadcast_object_list(completion_ids, from_process=0)
-                # Due to saving, len(completion_ids) >= len(prompts)
+
                 process_slice = slice(
                     self.accelerator.process_index * len(completion_ids),
                     (self.accelerator.process_index + 1) * len(completion_ids),
@@ -1183,10 +1199,13 @@ class GRPOTrainer(Trainer):
 
 
             # Pad the completions, and concatenate them with the prompts
-            completion_ids = [torch.tensor(ids, device=device) for ids in completion_ids]
-            completion_ids = pad(completion_ids, padding_value=self.processing_class.pad_token_id)
-            print(prompt_ids.shape, completion_ids.shape)
+            if not self.tool_use:
+                completion_ids = [torch.tensor(ids, device=device) for ids in completion_ids]
+                completion_ids = pad(completion_ids, padding_value=self.processing_class.pad_token_id)
+                print(prompt_ids.shape, completion_ids.shape)
+                
             prompt_completion_ids = torch.cat([prompt_ids, completion_ids], dim=1)
+                
         else:
             # Regular generation path
             # TODO: support tools inference for non-vllm case
@@ -1214,10 +1233,6 @@ class GRPOTrainer(Trainer):
         eos_idx[is_eos.any(dim=1)] = is_eos.int().argmax(dim=1)[is_eos.any(dim=1)]
         sequence_indices = torch.arange(is_eos.size(1), device=device).expand(is_eos.size(0), -1)
         completion_mask = (sequence_indices <= eos_idx.unsqueeze(1)).int()
-        
-        if self.tool_use:
-            tool_mask = self._build_tool_mask(completion_ids)
-            completion_mask = completion_mask * tool_mask
 
         # If mask_truncated_completions is enabled, zero out truncated completions in completion_mask
         if self.mask_truncated_completions:
@@ -1429,6 +1444,45 @@ class GRPOTrainer(Trainer):
         logits_to_keep = completion_ids.size(1)  # we only need to compute the logits for the completion tokens
 
         per_token_logps = self._get_per_token_logps(model, input_ids, attention_mask, logits_to_keep)
+        
+        
+        test_rl_masking = False
+        if test_rl_masking:
+            device = self.accelerator.device
+            prompt_completion_ids = torch.cat([prompt_ids, completion_ids], dim=1)
+            prompts = self.processing_class.batch_decode(prompt_ids, skip_special_tokens=True)
+            completions = self.processing_class.batch_decode(completion_ids, skip_special_tokens=True)
+            
+            masked_ids = prompt_completion_ids.clone().to(device)
+            masked_ids[attention_mask == 0] = self.processing_class.pad_token_id  # replace masked positions
+            # Decode each completion into string, replacing pad_token_id with '[MASKED]' for clarity
+            decoded = []
+            for ids, mask in zip(masked_ids, attention_mask):
+                tokens = self.tokenizer.convert_ids_to_tokens(ids)
+                visible = [t if m else '[MASKED]' for t, m in zip(tokens, mask)]
+                decoded.append(self.tokenizer.convert_tokens_to_string(visible))
+
+            # Print or inspect the result
+            for d in decoded:
+                print(d)
+            
+            output_data = [
+                {
+                    "context": p + c,
+                    "masked_context": d
+                } for p, c, d in zip(prompts, completions, decoded)
+            ]
+            import json
+            from datasets import load_dataset
+            output_path = "/workspace/s1-tool/s1_tool/tools/jsonl/verify_rl_masking.json"
+            with open(output_path, "w") as f:
+                json.dump(output_data, f, indent=4)
+            
+            dataset = load_dataset("json", data_files=output_path, split="train")
+            dataset.push_to_hub("ryzax/verify_rl_masking")
+                
+            import sys
+            sys.exit(1)
 
         # Compute the KL divergence between the model and the reference model
         if self.beta != 0.0:
@@ -1458,6 +1512,11 @@ class GRPOTrainer(Trainer):
         per_token_loss = -torch.min(per_token_loss1, per_token_loss2)
         if self.beta != 0.0:
             per_token_loss = per_token_loss + self.beta * per_token_kl
+            
+        # ignore loss calculation for tool result tokens
+        if self.tool_use:
+            tool_mask = self._build_tool_mask(completion_ids)
+            completion_mask = completion_mask * tool_mask
 
         if self.loss_type == "grpo":
             loss = ((per_token_loss * completion_mask).sum(-1) / completion_mask.sum(-1).clamp(min=1.0)).mean()
