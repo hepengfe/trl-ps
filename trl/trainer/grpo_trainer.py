@@ -1258,10 +1258,15 @@ class GRPOTrainer(Trainer):
         # Decode the generated completions
         completions_text = self.processing_class.batch_decode(completion_ids, skip_special_tokens=True)
         if is_conversational(inputs[0]):
-            completions = []
-            for prompt, completion in zip(prompts, completions_text):
-                bootstrap = prompt.pop()["content"] if prompt[-1]["role"] == "assistant" else ""
-                completions.append([{"role": "assistant", "content": bootstrap + completion}])
+            if self.tool_use == False:
+                completions = []
+                for prompt, completion in zip(prompts, completions_text):
+                    bootstrap = prompt.pop()["content"] if prompt[-1]["role"] == "assistant" else ""
+                    completions.append([{"role": "assistant", "content": bootstrap + completion}])
+            else:
+                completions = []
+                for completion in completions_text:
+                    completions.append([{"role": "assistant", "content": completion}])
         else:
             completions = completions_text
 
@@ -1294,6 +1299,10 @@ class GRPOTrainer(Trainer):
 
                     rewards_per_func[:, i] = torch.tensor(output_reward_func, dtype=torch.float32, device=device)
 
+        print(rewards_per_func)
+        import sys
+        sys.exit(1)
+        
         # If all reward functions return None for a given row, issue a detailed warning
         if torch.isnan(rewards_per_func).all(dim=1).any():
             nan_row_idx = torch.isnan(rewards_per_func).all(dim=1).nonzero(as_tuple=True)[0][0]
