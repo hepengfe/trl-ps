@@ -602,6 +602,7 @@ class GRPOTrainer(Trainer):
             "prompt": deque(maxlen=maxlen),
             "completion": deque(maxlen=maxlen),
             "rewards": defaultdict(lambda: deque(maxlen=maxlen)),
+            "answer": deque(maxlen=maxlen),
         }
 
         # Ensure each process receives a unique seed to prevent duplicate completions when generating with
@@ -1241,7 +1242,7 @@ class GRPOTrainer(Trainer):
         # Log prompt and completion texts
         self._textual_logs["prompt"].extend(gather_object(prompts_text))
         self._textual_logs["completion"].extend(gather_object(completions_text))
-        if "answer" in inputs:
+        if "answer" in inputs[0]:
             self._textual_logs["answer"].extend(gather_object([x["answer"] for x in inputs]))
         for i, name in enumerate(self.reward_func_names):
             self._textual_logs["rewards"][name].extend(rewards_per_func[:, i].tolist())
@@ -1433,6 +1434,8 @@ class GRPOTrainer(Trainer):
                     "completion": self._textual_logs["completion"],
                     **self._textual_logs["rewards"],
                 }
+                if "answer" in self._textual_logs:
+                    table["answer"] = self._textual_logs["answer"]
                 df = pd.DataFrame(table)
                 if self.wandb_log_unique_prompts:
                     df = df.drop_duplicates(subset=["prompt"])
