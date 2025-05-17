@@ -226,9 +226,10 @@ def generate_with_tool_batch(
         completions_to_return.append(context[prompts_len[i]:])
     
     
-    # **IMPORTANT**: The returns are formatted as follows. Suppose there's 3 prompts, and each has 3 saving samples.
+    # **IMPORTANT**: The returns are formatted as follows. Suppose there's 3 prompts, and each has 3 saving segments.
+    # output0a looks like “thinking, saving”, output1b looks like “saving 1, thinking 2, saving 2", output1c looks like “saving 2, thinking 3, answer”
     # prompts_to_return = [prompts[0], prompts[0], ..., prompts[2], prompts[2], prompts[0], ..., prompts[2]]
-    # completions_to_return = [output1a, output1b, ..., output3a, output3b, output1c, ..., output3c]
+    # completions_to_return = [output0a, output0b, ..., output2a, output2b, output0c, ..., output2c]
     
     
     return prompts_to_return, completions_to_return, stats
