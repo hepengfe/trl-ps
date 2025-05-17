@@ -678,10 +678,10 @@ class GRPOTrainer(Trainer):
             # args.vllm_server_host, args.vllm_server_port, args.vllm_server_timeout
             # 0.0.0.0 8000 120.0
         
-            if args.saving:
-                assert args.tool_use is True, "Saving is only supported with tool_use=True"
-                global_batch_size = args.per_device_train_batch_size * num_processes
-                self.global_batch_size = global_batch_size
+            # if args.saving:
+            #     assert args.tool_use is True, "Saving is only supported with tool_use=True"
+            #     global_batch_size = args.per_device_train_batch_size * num_processes
+            #     self.global_batch_size = global_batch_size
                 
             if args.tool_format == "qwen":
                 from ..tools.async_tool_utils import _generate_with_tool_safe
@@ -697,17 +697,18 @@ class GRPOTrainer(Trainer):
             # Qwen3's tokenizers has tool tokens. If not using Qwen3, need to manually add these tokens 
             if self.tool_use:
                 # Ensure tokenizer knows the delimiters so we can recognise them by id
-                special = args.result_tokens + args.tool_tokens
+                special = args.result_tokens + args.tool_tokens + args.saving_tokens
                 added = [tok for tok in special
                         if self.processing_class.convert_tokens_to_ids(tok) is None]
-                assert len(added) == 0, f"Token list {added} is not in the tokenizer."
+                print(f"Token list {added} is not in the tokenizer.")
                 
                 if len(added) > 0:                              # add if not already present
-                    self.processing_class.add_tokens(added, special_tokens=True)
-                    self.model.resize_token_embeddings(len(self.processing_class))
+                    # self.processing_class.add_tokens(added, special_tokens=True)
+                    self.processing_class.add_tokens(added)
+                    # self.model.resize_token_embeddings(len(self.processing_class))
                 # Cache their ids for quick lookup later
-                self._tool_start_id = self.processing_class.convert_tokens_to_ids(args.tool_tokens[0])
-                self._tool_end_id   = self.processing_class.convert_tokens_to_ids(args.tool_tokens[1])
+                print(self.processing_class.convert_tokens_to_ids(args.saving_tokens[0]))
+                print(self.processing_class.convert_tokens_to_ids(args.saving_tokens[1]))
 
                 
 
@@ -1046,23 +1047,16 @@ class GRPOTrainer(Trainer):
         else:
             return generate_with_tool_batch(questions, self.args)
         
-    def _build_tool_mask(self, comp_ids: torch.Tensor) -> torch.Tensor:
-        """
-        Returns an int mask of shape (B, C) with 1s on tokens *outside*
-        <tool_response> … </tool_response> blocks and 0s inside them.
-        Used to leave certain tokens out for loss calculation.
-        """
+    def _build_tool_mask_for_token(self, mask: torch.Tensor, comp_ids: torch.Tensor, token_pair: List[str]) -> torch.Tensor:
         device = self.accelerator.device
         start_id = torch.tensor(
-            self.processing_class.encode(self.args.result_tokens[0], add_special_tokens=False),
+            self.processing_class.encode(token_pair[0], add_special_tokens=False),
             device=device
         )
         end_id = torch.tensor(
-            self.processing_class.encode(self.args.result_tokens[1], add_special_tokens=False),
+            self.processing_class.encode(token_pair[1], add_special_tokens=False),
             device=device
         )
-
-        mask = torch.ones_like(comp_ids, dtype=torch.int)
 
         # Scan each sequence once; sequences are short so Python loop is fine.
         for i in range(comp_ids.size(0)):
@@ -1077,6 +1071,18 @@ class GRPOTrainer(Trainer):
                     break                    # malformed, ignore
                 e = e_candidates[0]
                 mask[i, s:e + 1] = 0         # zero-out [<tool_response>, …, </tool_response>]
+        return mask
+        
+    def _build_tool_mask(self, comp_ids: torch.Tensor) -> torch.Tensor:
+        """
+        Returns an int mask of shape (B, C) with 1s on tokens *outside*
+        <tool_response> … </tool_response> blocks and 0s inside them.
+        Used to leave certain tokens out for loss calculation.
+        Also mask <saving> … </saving> blocks
+        """
+        mask = torch.ones_like(comp_ids, dtype=torch.int)
+        mask = self._build_tool_mask_for_token(mask, comp_ids, self.args.result_tokens)
+        mask = self._build_tool_mask_for_token(mask, comp_ids, self.args.saving_tokens)
         return mask
 
 
@@ -1283,6 +1289,9 @@ class GRPOTrainer(Trainer):
                         texts = [apply_chat_template(x, reward_processing_class)["text"] for x in messages]
                     else:
                         texts = [p + c for p, c in zip(prompts, completions)]
+                        
+                    assert self.tool_use is False, "Tool use is not supported when reward_func is of type nn.Module"
+                    
                     reward_inputs = reward_processing_class(
                         text=texts, return_tensors="pt", padding=True, padding_side="right", add_special_tokens=False
                     )
@@ -1293,15 +1302,50 @@ class GRPOTrainer(Trainer):
                     # Repeat all input columns (but "prompt" and "completion") to match the number of generations
                     keys = [key for key in inputs[0] if key not in ["prompt", "completion"]]
                     reward_kwargs = {key: [example[key] for example in inputs] for key in keys}
-                    output_reward_func = reward_func(prompts=prompts, completions=completions, **reward_kwargs)
+
+                    if self.tool_use:
+                        prompts_to_calculate_reward = prompts[-len(inputs):]
+                        completions_to_calculate_reward = completions[-len(inputs):]
+                        tmp_reward_func = reward_func(
+                            prompts=prompts_to_calculate_reward, 
+                            completions=completions_to_calculate_reward, 
+                            **reward_kwargs
+                        )
+                        tmp_idx = -1
+                        output_reward_func = []
+                        for c in completions[:-len(inputs)]:
+                            if "<saving>" not in str(c):
+                                tmp_idx += 1
+                            output_reward_func.append(tmp_reward_func[tmp_idx])  # broadcast reward to partial / saving-only steps
+                        output_reward_func.extend(tmp_reward_func)
+                    else:
+                        output_reward_func = reward_func(prompts=prompts, completions=completions, **reward_kwargs)
                     # Convert None values to NaN
                     output_reward_func = [reward if reward is not None else torch.nan for reward in output_reward_func]
 
+                    print(output_reward_func)
                     rewards_per_func[:, i] = torch.tensor(output_reward_func, dtype=torch.float32, device=device)
 
-        print(rewards_per_func)
-        import sys
-        sys.exit(1)
+        # testing saving reward broadcast
+        # import json
+        # from datasets import load_dataset
+        # output_path = "/workspace/s1-tool/s1_tool/tools/jsonl/verify_saving_reward.json"
+        # output_data = []
+        # for i in range(len(prompts)):
+        #     output_data.append(
+        #         {
+        #             "prompt": prompts[i],
+        #             "completion": completions[i],
+        #             "reward": int(rewards_per_func[i, 0]),
+        #         }
+        #     )
+        # with open(output_path, "w") as f:
+        #     json.dump(output_data, f, indent=4)
+        
+        # dataset = load_dataset("json", data_files=output_path, split="train")
+        # dataset.push_to_hub("ryzax/verify_saving_reward")
+        # import sys
+        # sys.exit(1)
         
         # If all reward functions return None for a given row, issue a detailed warning
         if torch.isnan(rewards_per_func).all(dim=1).any():
@@ -1453,45 +1497,6 @@ class GRPOTrainer(Trainer):
         logits_to_keep = completion_ids.size(1)  # we only need to compute the logits for the completion tokens
 
         per_token_logps = self._get_per_token_logps(model, input_ids, attention_mask, logits_to_keep)
-        
-        
-        test_rl_masking = False
-        if test_rl_masking:
-            device = self.accelerator.device
-            prompt_completion_ids = torch.cat([prompt_ids, completion_ids], dim=1)
-            prompts = self.processing_class.batch_decode(prompt_ids, skip_special_tokens=True)
-            completions = self.processing_class.batch_decode(completion_ids, skip_special_tokens=True)
-            
-            masked_ids = prompt_completion_ids.clone().to(device)
-            masked_ids[attention_mask == 0] = self.processing_class.pad_token_id  # replace masked positions
-            # Decode each completion into string, replacing pad_token_id with '[MASKED]' for clarity
-            decoded = []
-            for ids, mask in zip(masked_ids, attention_mask):
-                tokens = self.tokenizer.convert_ids_to_tokens(ids)
-                visible = [t if m else '[MASKED]' for t, m in zip(tokens, mask)]
-                decoded.append(self.tokenizer.convert_tokens_to_string(visible))
-
-            # Print or inspect the result
-            for d in decoded:
-                print(d)
-            
-            output_data = [
-                {
-                    "context": p + c,
-                    "masked_context": d
-                } for p, c, d in zip(prompts, completions, decoded)
-            ]
-            import json
-            from datasets import load_dataset
-            output_path = "/workspace/s1-tool/s1_tool/tools/jsonl/verify_rl_masking.json"
-            with open(output_path, "w") as f:
-                json.dump(output_data, f, indent=4)
-            
-            dataset = load_dataset("json", data_files=output_path, split="train")
-            dataset.push_to_hub("ryzax/verify_rl_masking")
-                
-            import sys
-            sys.exit(1)
 
         # Compute the KL divergence between the model and the reference model
         if self.beta != 0.0:
@@ -1526,6 +1531,44 @@ class GRPOTrainer(Trainer):
         if self.tool_use:
             tool_mask = self._build_tool_mask(completion_ids)
             completion_mask = completion_mask * tool_mask
+            
+        test_rl_masking = False
+        if test_rl_masking:
+            device = self.accelerator.device
+            # prompt_completion_ids = torch.cat([prompt_ids, completion_ids], dim=1)
+            prompts = self.processing_class.batch_decode(prompt_ids, skip_special_tokens=True)
+            completions = self.processing_class.batch_decode(completion_ids, skip_special_tokens=True)
+            
+            masked_ids = completion_ids.clone().to(device)
+            masked_ids[completion_mask == 0] = self.processing_class.pad_token_id  # replace masked positions
+            # Decode each completion into string, replacing pad_token_id with '[MASKED]' for clarity
+            decoded = []
+            for ids, mask in zip(masked_ids, completion_mask):
+                tokens = self.tokenizer.convert_ids_to_tokens(ids)
+                visible = [t if m else '[MASKED]' for t, m in zip(tokens, mask)]
+                decoded.append(self.tokenizer.convert_tokens_to_string(visible))
+
+            # Print or inspect the result
+            for d in decoded:
+                print(d)
+            
+            output_data = [
+                {
+                    "completion": c,
+                    "masked_completion": d
+                } for p, c, d in zip(prompts, completions, decoded)
+            ]
+            import json
+            from datasets import load_dataset
+            output_path = "/workspace/s1-tool/s1_tool/tools/jsonl/verify_rl_masking.json"
+            with open(output_path, "w") as f:
+                json.dump(output_data, f, indent=4)
+            
+            dataset = load_dataset("json", data_files=output_path, split="train")
+            dataset.push_to_hub("ryzax/verify_rl_masking")
+                
+            import sys
+            sys.exit(1)
 
         if self.loss_type == "grpo":
             loss = ((per_token_loss * completion_mask).sum(-1) / completion_mask.sum(-1).clamp(min=1.0)).mean()

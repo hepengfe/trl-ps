@@ -487,12 +487,12 @@ class GRPOConfig(TrainingArguments):
         },
     )
     
-    saving: bool = field(
-        default=False,
-        metadata={
-            "help": "Use inftythink-type summarization in CoT infernence."
-        },
-    )
+    # saving: bool = field(
+    #     default=False,
+    #     metadata={
+    #         "help": "Use inftythink-type summarization in CoT infernence."
+    #     },
+    # )
     
     tool_format: str = field(
         # choice=["deepseek", "qwen"],
@@ -530,7 +530,7 @@ class GRPOConfig(TrainingArguments):
     # )
     
     saving_tokens: list[str] = field(
-        default_factory=lambda: ["<save>", "</save>"],
+        default_factory=lambda: ["<saving>", "</saving>"],
         metadata={
             "help": "Saving token to be detected during tool inference. If detected, "
             "will call saving and replace the thinking trajectory with summarization"
@@ -569,7 +569,7 @@ class GRPOConfig(TrainingArguments):
     )
     
     eos_token: str = field(
-        default="<｜end_of_sentence｜>",
+        default="<|im_end|>",
         metadata={
             "help": "End of sentence token to be detected during tool inference. If detected, "
             "will stop the thinking trajectory"

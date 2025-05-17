@@ -198,8 +198,8 @@ def generate_with_tool_batch(
                 summary = detect["tool_argument"]
                 
                 # bookkeep the old thinking & summary
-                contexts_to_return.append(contexts[global_i])
-                completions_to_return.append(contexts[global_i][prompts_len[global_i]:])
+                contexts_to_return.append(contexts[global_i] + f"\n{args.eos_token}\n")
+                completions_to_return.append(contexts[global_i][prompts_len[global_i]:] + f"\n{args.eos_token}\n")
                 prompts_to_return.append(contexts[global_i][:prompts_len[global_i]])
                 
                 # Replace all old thinking with the summary
@@ -226,15 +226,52 @@ def generate_with_tool_batch(
         completions_to_return.append(context[prompts_len[i]:])
     
     
-    return contexts_to_return, completions_to_return, stats
+    # **IMPORTANT**: The returns are formatted as follows. Suppose there's 3 prompts, and each has 3 saving samples.
+    # prompts_to_return = [prompts[0], prompts[0], ..., prompts[2], prompts[2], prompts[0], ..., prompts[2]]
+    # completions_to_return = [output1a, output1b, ..., output3a, output3b, output1c, ..., output3c]
     
-    # return [prompts[0], prompts[1]], [example_output1, example_output2], stats
+    
+    return prompts_to_return, completions_to_return, stats
+    
+    # to test RL masking, comment the above return and uncomment the following
+    # return [prompts[0], prompts[1]], [example_output1c, example_output2c], stats
+    
+    # to test inftythink reward broadcasting, comment the above return and uncomment the following
+    # return [prompts[0], prompts[0], prompts[1], prompts[1], prompts[0], prompts[1]], [example_output1a, example_output1b, example_output2a, example_output2b, example_output1c, example_output2c], stats
 
 
 
+example_output1a = """
+<think>
+Let me attempt a diagram and use triangle properties to compute AD². Since ABCD is cyclic, and ∠DBC is 15°, this may involve using extended Law of Sines or triangle similarity. I’ll first sketch the geometry to better visualize the problem.
+</think>
+<tool_call>
+{"name": "saving", "arguments": {"summary": "Draw diagram and recall triangle properties to prepare for using extended Law of Sines or triangle similarity."}}
+</tool_call>
+<|im_end|>
+"""
+
+example_output1b = """
+<saving>
+Draw diagram and recall triangle properties to prepare for using extended Law of Sines or triangle similarity.
+</saving>
+<think>
+From the diagram, I can label the triangle ΔBDC and apply the Extended Law of Sines:  
+For triangle BDC, with R = 100√3 and ∠DBC = 15°, use:
+\[ \frac{BC}{\sin(\angle BDC)} = 2R \]
+We can reverse compute BC, then use triangle relationships to find AD.
+</think>
+<tool_call>
+{"name": "saving", "arguments": {"summary": "Apply extended Law of Sines on triangle BDC with R=100√3 and ∠DBC=15° to compute BC."}}
+</tool_call>
+<|im_end|>
+"""
 
 
-example_output1 = """
+example_output1c = """
+<saving>
+Draw diagram and recall triangle properties to prepare for using extended Law of Sines or triangle similarity.
+</saving>
 <think>
 Let me attempt a diagram and use triangle properties to compute AD². Since ABCD is cyclic, and ∠DBC is 15°, this may involve using extended Law of Sines or triangle similarity. I’ll first sketch the geometry to better visualize the problem.
 </think>
@@ -247,7 +284,7 @@ Let me attempt a diagram and use triangle properties to compute AD². Since ABCD
 <think>
 From the diagram, I can label the triangle ΔBDC and apply the Extended Law of Sines:  
 For triangle BDC, with R = 100√3 and ∠DBC = 15°, use:
-\[ \frac{BC}{\sin(\angle BDC)} = 2R \]
+\[ \\frac{BC}{\sin(\\angle BDC)} = 2R \]
 We can reverse compute BC, then use triangle relationships to find AD.
 </think>
 <tool_call>
@@ -266,7 +303,7 @@ So BC = 200. Let’s now use the Cosine Law in triangle ADC using known sides an
 {"result": 519.6152422706632}
 </tool_response>
 **Final Answer**
-\boxed{270000}
+\\boxed{60000}
 
 **Step-by-Step Explanation:**
 1. Drew a diagram of the cyclic quadrilateral.
@@ -277,10 +314,38 @@ So BC = 200. Let’s now use the Cosine Law in triangle ADC using known sides an
 """
 
 
-example_output2 = """
+example_output2a = """
 <think>
 To solve for the maximum height, we need the vertical component of velocity and apply the formula:
-\[ h = \frac{v_y^2}{2g} \]
+\[ h = \\frac{v_y^2}{2g} \]
+Let’s compute the vertical component first.
+</think>
+<tool_call>
+{"name": "saving", "arguments": {"summary": "Plan to compute vertical velocity component and apply projectile height formula."}}
+</tool_call>
+<|im_end|>
+"""
+
+example_output2b = """
+<saving>
+Computed vertical velocity v_y = 30 m/s using angle decomposition.
+</saving>
+<think>
+Vertical velocity is 30 m/s. Now calculate the maximum height.
+</think>
+<tool_call>
+{"name": "saving", "arguments": {"summary": "Use formula h = v_y² / (2g) with v_y = 30 and g = 9.8 to compute height."}}
+</tool_call>
+<|im_end|>
+"""
+
+example_output2c = """
+<saving>
+Computed vertical velocity v_y = 30 m/s using angle decomposition.
+</saving>
+<think>
+To solve for the maximum height, we need the vertical component of velocity and apply the formula:
+\[ h = \\frac{v_y^2}{2g} \]
 Let’s compute the vertical component first.
 </think>
 <tool_call>
@@ -308,11 +373,11 @@ The maximum height is approximately 45.92 meters. I’ll cross-verify this with 
 {"summary": "The maximum height of a projectile is given by h = (v_y^2) / (2g), where v_y is the initial vertical velocity and g is the acceleration due to gravity."}
 </tool_response>
 **Final Answer**
-\boxed{45.92\ \text{m}}
+\\boxed{45.92\ \\text{m}}
 
 **Step-by-Step:**
-1. Vertical component: \(v_y = 60 \sin(30^\circ) = 30\ \text{m/s}\)
-2. Applied height formula: \(h = \frac{30^2}{2 \cdot 9.8} ≈ 45.92\ \text{m}\)
+1. Vertical component: \(v_y = 60 \sin(30^\circ) = 30\ \\text{m/s}\)
+2. Applied height formula: \(h = \\frac{30^2}{2 \cdot 9.8} ≈ 45.92\ \\text{m}\)
 3. Verified with external source.
 <|im_end|>
 """
