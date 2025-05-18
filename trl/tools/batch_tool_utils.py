@@ -134,7 +134,7 @@ def generate_with_tool_batch(
             active_prompts,
             max_tokens=max(tokens_left[i] for i in active_idx),
             args=args,
-            stop=[args.tool_tokens[0], args.eos_token],
+            stop=[args.result_tokens[0], args.eos_token],
         )
 
         # Walk over every *active* prompt
