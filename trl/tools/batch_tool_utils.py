@@ -40,6 +40,12 @@ from .python_and_retriever import (
 from ..trainer.grpo_config import GRPOConfig
 from .python_and_retriever import google_retriever,python_interpreter, remove_python_prefix
 from .async_tool_utils import _detect_tool_use
+from ..import_utils import is_vllm_available
+
+if is_vllm_available():
+    from vllm import LLM, SamplingParams
+    from vllm.sampling_params import GuidedDecodingParams
+
 
 ################################################################################
 # vLLM helpers
@@ -51,33 +57,58 @@ def _make_tool_inference_requests_batch(
     max_tokens: int,
     args: GRPOConfig,
     stop: Optional[List[str]] | None = None,
+    llm: LLM = None,
 ) -> Tuple[List[List[int]], List[str]]:
     """
     Submit **N** prompts in one request and return (ids_list, text_list) with
     matching order.
     """
-    url = f"http://{args.vllm_server_host}:{args.vllm_server_port}/generate/"
-    resp = requests.post(
-        url,
-        json={
-            "prompts": prompts,
-            "n": 1,
-            "repetition_penalty": args.repetition_penalty,
-            "temperature": args.temperature,
-            "top_p": args.top_p,
-            "top_k": -1 if args.top_k is None else args.top_k,
-            "min_p": 0.0 if args.min_p is None else args.min_p,
-            "max_tokens": max_tokens,
-            "guided_decoding_regex": args.vllm_guided_decoding_regex,
-            "stop": stop,
-        },
-        timeout=600,
-    )
-    if resp.status_code != 200:
-        raise RuntimeError(f"vLLM request failed: {resp.status_code}: {resp.text}")
+    if args.vllm_mode == "server":
+        url = f"http://{args.vllm_server_host}:{args.vllm_server_port}/generate/"
+        resp = requests.post(
+            url,
+            json={
+                "prompts": prompts,
+                "n": 1,
+                "repetition_penalty": args.repetition_penalty,
+                "temperature": args.temperature,
+                "top_p": args.top_p,
+                "top_k": -1 if args.top_k is None else args.top_k,
+                "min_p": 0.0 if args.min_p is None else args.min_p,
+                "max_tokens": max_tokens,
+                "guided_decoding_regex": args.vllm_guided_decoding_regex,
+                "stop": stop,
+            },
+            timeout=600,
+        )
+        if resp.status_code != 200:
+            raise RuntimeError(f"vLLM request failed: {resp.status_code}: {resp.text}")
 
-    j = resp.json()
-    return j["completion_ids"], j["completion_text"]  # type: ignore[return-value]
+        j = resp.json()
+        return j["completion_ids"], j["completion_text"]  # type: ignore[return-value]
+    
+    elif args.vllm_mode == "colocate":
+        assert llm is not None, "Require llm for tool inference"
+        sampling_params = SamplingParams(
+            n=1,
+            temperature=args.temperature,
+            top_p=args.top_p,
+            top_k=-1 if args.top_k is None else args.top_k,
+            min_p=0.0 if args.min_p is None else args.min_p,
+            repetition_penalty=args.repetition_penalty,
+            max_tokens=max_tokens,
+            stop=stop,
+            guided_decoding_regex=args.vllm_guided_decoding_regex,
+        )
+
+        outputs = llm.generate(prompts, sampling_params)
+        return (
+            [out.outputs[0].token_ids for out in outputs],
+            [out.outputs[0].text for out in outputs],
+        )
+        
+    else:
+        raise ValueError(f"Unsupported vllm_mode: {args.vllm_mode}")
 
 
 ################################################################################
