@@ -31,6 +31,7 @@ from typing import Dict, List, Optional, Tuple, Union
 
 import requests
 import trl
+import os
 
 from .python_and_retriever import (
     google_retriever,
@@ -98,7 +99,6 @@ def _make_tool_inference_requests_batch(
             repetition_penalty=args.repetition_penalty,
             max_tokens=max_tokens,
             stop=stop,
-            guided_decoding_regex=args.vllm_guided_decoding_regex,
         )
 
         outputs = llm.generate(prompts, sampling_params)
@@ -119,7 +119,8 @@ def _make_tool_inference_requests_batch(
 def generate_with_tool_batch(
     prompts: List[str],
     args: GRPOConfig,
-) -> Tuple[List[str], List[Dict[str, int]]]:
+    llm: LLM = None,
+) -> Tuple[List[str], List[str], List[Dict[str, int]]]:
     """
     Parameters
     ----------
@@ -166,6 +167,7 @@ def generate_with_tool_batch(
             max_tokens=max(tokens_left[i] for i in active_idx),
             args=args,
             stop=[args.result_tokens[0], args.eos_token],
+            llm=llm,
         )
 
         # Walk over every *active* prompt
@@ -247,6 +249,7 @@ def generate_with_tool_batch(
         max_tokens=128,
         args=args,
         stop=[args.eos_token],
+        llm=llm,
     )
     for i in range(len(contexts)):
         contexts[i] += final_answer[i] + f"\n{args.eos_token}"
