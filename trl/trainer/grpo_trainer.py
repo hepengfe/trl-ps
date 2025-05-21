@@ -1135,7 +1135,6 @@ class GRPOTrainer(Trainer):
                             )
                     else:
                         # tool inference using vllm
-                        all_prompts_text = gather_object(prompts_text)
                         if self.accelerator.is_main_process:
                             with profiling_context(self, "vLLM.generate"):
                                 prompts, completions, tool_stats = self._generate_with_tool(all_prompts_text, 20)
@@ -1209,7 +1208,7 @@ class GRPOTrainer(Trainer):
                 completion_ids = [torch.tensor(ids, device=device) for ids in completion_ids]
                 completion_ids = pad(completion_ids, padding_value=self.processing_class.pad_token_id)
                 print(prompt_ids.shape, completion_ids.shape)
-                
+
             prompt_completion_ids = torch.cat([prompt_ids, completion_ids], dim=1)
                 
         else:
