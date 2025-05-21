@@ -4,6 +4,7 @@ import time
 from tqdm import tqdm
 import trl
 import multiprocessing
+import re
 
 from typing import Any, Dict, List, Optional, Union, Tuple
 
@@ -41,12 +42,11 @@ def _make_tool_inference_requests(
         raise Exception(f"Request failed: {response.status_code}, {response.text}")
 
 
-def _detect_tool_use(context: str, prompt_idx: int, tokens_left: int, args: GRPOConfig) -> dict:
+def _detect_tool_use(context: str, prompt_idx: int) -> dict:
     """
     Detect tool usage in a generation context. Extracts:
-    - Python code between <|im_start|>python and <|im_start|>result
-    - Retrieval query between <|im_start|>retrieval and <|im_start|>result
-    - Saved summary between last <save> and </save> (with error detection for nesting)
+    - Python code, Retrieval query or Saved summary
+    - between <tool_call> and </tool_call>
     
     Returns a dict:
     {
@@ -88,20 +88,27 @@ def _detect_tool_use(context: str, prompt_idx: int, tokens_left: int, args: GRPO
     # then end = -1
     
     try:
-        tool_call_raw = generated[start + len(start_tag):end].strip()
+        if end == -1:
+            tool_call_raw = generated[start + len(start_tag):].strip()
+        else:
+            tool_call_raw = generated[start + len(start_tag):end].strip()
+        tool_call_raw = tool_call_raw.encode('utf-8').decode('unicode_escape').strip()
+        tool_call_raw = re.sub(r'(?<!\\)\n', r'\\n', tool_call_raw)
         parsed = json.loads(tool_call_raw)
         result = {
             "tool_use": True,
             "tool_type": parsed["name"],
             "tool_argument": parsed["arguments"],
-            "error_tool_use": True
+            "error_tool_use": False,
         }
-    except json.JSONDecodeError:
+    except json.JSONDecodeError as e:
+        print(e)
+        print(tool_call_raw)
         result = {
             "tool_use": True,
             "tool_type": None,
             "tool_argument": None,
-            "error_tool_use": True
+            "error_tool_use": True,
         }
 
     return result
@@ -274,3 +281,13 @@ def generate_with_tool_async(questions: list, args: GRPOConfig, max_processes: i
             bar.update(1)
             
     return results
+
+
+
+if __name__ == "__main__":
+    example = r'''<tool_call>\n{"name": "python", "arguments": {"code": "import math\nresult = math.factorial(7) / (math.factorial(2) * math.factorial(2))\nprint(result)"}}</tool_call>\n'''
+    detect = _detect_tool_use(
+        example,
+        prompt_idx=0,
+    )
+    print(detect)

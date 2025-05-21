@@ -32,6 +32,7 @@ from typing import Dict, List, Optional, Tuple, Union
 import requests
 import trl
 import os
+import traceback
 
 from .python_and_retriever import (
     google_retriever,
@@ -189,13 +190,12 @@ def generate_with_tool_batch(
             detect = _detect_tool_use(
                 contexts[global_i],
                 prompt_idx=len(contexts[global_i]) - len(comp_text),
-                tokens_left=tokens_left[global_i],
-                args=args,
             )
 
             if detect["error_tool_use"]:
-                print(f"[{global_i}] malformed tool call – skipping.")
-                done[global_i] = True
+                print(f"[{global_i}] malformed tool call – skipping tool use.")
+                # done[global_i] = True
+                contexts[global_i] += f"\n{args.result_tokens[1]}\n"
                 continue
 
             # ------------------------------------------------------------------
@@ -219,22 +219,37 @@ def generate_with_tool_batch(
             # 4. Execute tool & insert result
             # ------------------------------------------------------------------
             tool_type = detect["tool_type"]
-            contexts[global_i] += f"\n{args.result_token}\n"
+            # contexts[global_i] += f"\n{args.result_tokens[0]}\n"
+            
+            tool_start = time.time()
 
             if tool_type == "python":
                 stats[global_i]["num_python"] += 1
-                code = remove_python_prefix(**detect["tool_argument"])
-                _, exec_out = python_interpreter(code)
+                code = remove_python_prefix(text=detect["tool_argument"]['code'])
+                try:
+                    _, exec_out = python_interpreter(code)
+                except Exception as e:
+                    print(f"[ERROR] Python execution failed for code:\n{code}")
+                    traceback.print_exc()
+                    exec_out = ""
+                
                 contexts[global_i] += (
-                    "<tool_response>\n" + exec_out + "\n</tool_response>\n"
+                    f"{args.result_tokens[0]}\n" + exec_out + f"\n{args.result_tokens[1]}\n"
                 )
 
             elif tool_type in ("retrieval", "retrieve"):
                 stats[global_i]["num_retrieval"] += 1
-                result = google_retriever(**detect["tool_argument"])
-                result_text = result.response if result else ""
+                try:
+                    result = google_retriever(**detect["tool_argument"])
+                    result_text = result.response if result else ""
+                except Exception as e:
+                    import traceback
+                    print(f"[ERROR] Retrieval failed.")
+                    traceback.print_exc()
+                    result_text = ""
+
                 contexts[global_i] += (
-                    "<tool_response>\n" + result_text + "\n</tool_response>\n"
+                    f"{args.result_tokens[0]}\n" + result_text + f"\n{args.result_tokens[1]}\n"
                 )
 
             elif tool_type == "saving":
@@ -253,6 +268,9 @@ def generate_with_tool_batch(
                     + summary
                     + f"\n{args.saving_tokens[1]}\n"
                 )
+                
+            tool_duration = time.time() - tool_start
+            print(f"[Time] {tool_type} tool call took {tool_duration:.2f} seconds")
             
     # one more short call to get the final answer
     _, final_answer = _make_tool_inference_requests_batch(
