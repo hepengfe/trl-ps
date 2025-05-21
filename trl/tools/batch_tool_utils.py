@@ -230,7 +230,7 @@ def generate_with_tool_batch(
                     _, exec_out = python_interpreter(code)
                 except Exception as e:
                     print(f"[ERROR] Python execution failed for code:\n{code}")
-                    traceback.print_exc()
+                    print(e)
                     exec_out = ""
                 
                 contexts[global_i] += (
@@ -243,9 +243,8 @@ def generate_with_tool_batch(
                     result = google_retriever(**detect["tool_argument"])
                     result_text = result.response if result else ""
                 except Exception as e:
-                    import traceback
                     print(f"[ERROR] Retrieval failed.")
-                    traceback.print_exc()
+                    print(e)
                     result_text = ""
 
                 contexts[global_i] += (
