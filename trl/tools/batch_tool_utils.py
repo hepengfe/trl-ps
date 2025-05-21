@@ -159,12 +159,14 @@ def generate_with_tool_batch(
     step = 0
     while not all(done):
         step += 1
+        if step >= 20:
+            break
         active_idx = [i for i, d in enumerate(done) if not d]
         active_prompts = [contexts[i] for i in active_idx]
 
         comp_ids_list, comp_text_list = _make_tool_inference_requests_batch(
             active_prompts,
-            max_tokens=max(tokens_left[i] for i in active_idx),
+            max_tokens=min(tokens_left[i] for i in active_idx),
             args=args,
             stop=[args.result_tokens[0], args.eos_token],
             llm=llm,
@@ -199,10 +201,19 @@ def generate_with_tool_batch(
             # ------------------------------------------------------------------
             # 3. Termination: no tool call OR ran out of budget
             # ------------------------------------------------------------------
-            if not detect["tool_use"] or tokens_left[global_i] <= 0:
-                contexts[global_i] += "\n</think>\n**Final Answer**\n"
-                done[global_i] = True
-                continue
+            if not detect["tool_use"]:
+                # Case 1: token exceeded limit for current prompt
+                # Case 2: current prompt finished naturally
+                if tokens_left[global_i] <= 0:
+                    contexts[global_i] += "\n</think>\n**Final Answer**\n"
+                    done[global_i] = True
+                    continue
+                elif "Final Answer" in contexts[global_i]:
+                    done[global_i] = True
+                    continue
+                # Case 3: One prompt in batch stopped because of length limit, or some unknown issue
+                else:
+                    continue
 
             # ------------------------------------------------------------------
             # 4. Execute tool & insert result
