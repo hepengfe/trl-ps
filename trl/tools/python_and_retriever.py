@@ -15,16 +15,17 @@ import types
 import builtins
 
 # base_model = 'gpt-4o-2024-08-06'
-base_model = 'o3-mini-2025-01-31'
+# base_model = 'o3-mini-2025-01-31'
+base_model = 'gpt-4.1-nano-2025-04-14'
 
 client = openai.OpenAI(
-    api_key=os.environ.get("OPENAI_API_KEY", ""),
-    base_url=os.environ.get("OPENAI_BASE_URL", "https://hk.xty.app/v1"),
-    http_client=httpx.Client(
-        base_url="https://hk.xty.app/v1",
-        follow_redirects=True,
-    ),
-    )
+    api_key=os.environ.get("OPENAI_API_KEY", "YOUR_API_KEY"),
+    # base_url=os.environ.get("OPENAI_BASE_URL", "https://hk.xty.app/v1"),
+    # http_client=httpx.Client(
+    #     base_url="https://hk.xty.app/v1",
+    #     follow_redirects=True,
+    # ),
+)
 
 def count_tokens(text, model_name=base_model):
     encoding = tiktoken.encoding_for_model(model_name)
@@ -71,12 +72,12 @@ def google_retriever(query,retrieve_websites = 2):
     response.raise_for_status()
     data = response.json()
     import openai
-    openai.api_key = os.environ.get("OPENAI_API_KEY", "") 
-    openai.base_url = os.environ.get("OPENAI_BASE_URL", "https://hk.xty.app/v1")
-    openai.http_client = httpx.Client(
-            base_url="https://hk.xty.app/v1",
-            follow_redirects=True,
-        )
+    openai.api_key = os.environ.get("OPENAI_API_KEY", "YOUR_API_KEY") 
+    # openai.base_url = os.environ.get("OPENAI_BASE_URL", "https://hk.xty.app/v1")
+    # openai.http_client = httpx.Client(
+    #         base_url="https://hk.xty.app/v1",
+    #         follow_redirects=True,
+    #     )
         
     urls = []
     for item in data.get('items', []):
@@ -222,11 +223,11 @@ def python_interpreter(code: str) -> str:
     the code's intended behavior.
     """
 
-    code,output, error_output = execute_and_capture(code,client,5)
+    code, output, error_output = execute_and_capture(code,client,5)
     if output:
-        return code,output
+        return code, output
     else:
-        return code,error_output
+        return code, error_output
 
 
 if __name__ == "__main__":
@@ -239,32 +240,32 @@ if __name__ == "__main__":
     # # #    file.write(str(response))
     # # # # The text shows in the terminal might be incomplete. Please refer to retriever_response.txt.
     # print(response)
-#     query = """
-# def trap(height):
-#     n = len(height)
-#     if n <= 2: return 0
-#     left, right = 0, n - 1
-#     left_max, right_max = height[left], height[right]
-#     water = 0
-#     while left < right:
-#         if height[left] < height[right]:
-#             if height[left] >= left_max:
-#                 left_max = height[left]
-#             else:
-#                 water += left_max - height[left]
-#             left += 1
-#         else:
-#             if height[right] >= right_max:
-#                 right_max = height[right]
-#             else:
-#                 water += right_max - height[right]
-#             right -= 1
-#     return water
+    query = """
+def trap(height):
+    n = len(height)
+    if n <= 2: return 0
+    left, right = 0, n - 1
+    left_max, right_max = height[left], height[right]
+    water = 0
+    while left < right:
+        if height[left] < height[right]:
+            if height[left] >= left_max:
+                left_max = height[left]
+            else:
+                water += left_max - height[left]
+            left += 1
+        else:
+            if height[right] >= right_max:
+                right_max = height[right]
+            else:
+                water += right_max - height[right]
+            right -= 1
+    return water
 
-# height = [0,1,0,2,1,0,1,3,2,1,2,1]
-# result = trap(height)
-# print(f"Total water trapped: {result}")
-# """
-    # query = "2022/1347"
-    # response = python_interpreter(query)
-    # print(response)
+height = [0,1,0,2,1,0,1,3,2,1,2,1]
+result = trap(height)
+print(f"Total water trapped: {result}")
+"""
+    query = "2022/1347"
+    response = python_interpreter(query)
+    print(response)

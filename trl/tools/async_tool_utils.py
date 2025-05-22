@@ -4,6 +4,7 @@ import time
 from tqdm import tqdm
 import trl
 import multiprocessing
+import re
 
 from typing import Any, Dict, List, Optional, Union, Tuple
 
@@ -41,12 +42,11 @@ def _make_tool_inference_requests(
         raise Exception(f"Request failed: {response.status_code}, {response.text}")
 
 
-def _detect_tool_use(context: str, prompt_idx: int, tokens_left: int, args: GRPOConfig) -> dict:
+def _detect_tool_use(context: str, prompt_idx: int) -> dict:
     """
     Detect tool usage in a generation context. Extracts:
-    - Python code between <|im_start|>python and <|im_start|>result
-    - Retrieval query between <|im_start|>retrieval and <|im_start|>result
-    - Saved summary between last <save> and </save> (with error detection for nesting)
+    - Python code, Retrieval query or Saved summary
+    - between <tool_call> and </tool_call>
     
     Returns a dict:
     {
@@ -60,7 +60,8 @@ def _detect_tool_use(context: str, prompt_idx: int, tokens_left: int, args: GRPO
         "tool_use": False,
         "tool_type": None,
         "tool_argument": None,
-        "error_tool_use": False
+        "error_tool_use": False,
+        "tool_start_idx": None,
     }
 
     generated = context[prompt_idx:]
@@ -86,23 +87,57 @@ def _detect_tool_use(context: str, prompt_idx: int, tokens_left: int, args: GRPO
     # If </tool_call> is not at the end of the generation because of vllm stop
     # then end = -1
     
-    try:
+    if end == -1:
+        tool_call_raw = generated[start + len(start_tag):].strip()
+    else:
         tool_call_raw = generated[start + len(start_tag):end].strip()
+    
+    try:            
+        tool_call_raw = tool_call_raw.encode('utf-8').decode('unicode_escape').strip()
+        # tool_call_raw = re.sub(r'(?<!\\)\n', r'\\n', tool_call_raw)
+        # tool_call_raw = tool_call_raw.replace('“', '\\"').replace('”', '\\"')
+        
         parsed = json.loads(tool_call_raw)
         result = {
             "tool_use": True,
             "tool_type": parsed["name"],
             "tool_argument": parsed["arguments"],
-            "error_tool_use": True
+            "error_tool_use": False,
+            "tool_start_idx": start,
         }
-    except json.JSONDecodeError:
+        return result
+    except json.JSONDecodeError as e:
+        print(e)
+    
+    # if json parsing fails, fall back to regex
+    code_match = re.search(r'"code"\s*:\s*"(.+?)"\s*}', tool_call_raw, re.DOTALL)
+    query_match = re.search(r'"query"\s*:\s*"(.+?)"\s*}', tool_call_raw, re.DOTALL)
+    print("Using regex to capture tool call.")
+    if code_match:
+        result = {
+            "tool_use": True,
+            "tool_type": "python",
+            "tool_argument": {"code": code_match.group(1)},
+            "error_tool_use": False,
+            "tool_start_idx": start,
+        }
+    elif query_match:
+        result = {
+            "tool_use": True,
+            "tool_type": "retrieval",
+            "tool_argument": {"query": query_match.group(1)},
+            "error_tool_use": False,
+            "tool_start_idx": start,
+        }
+    else:
         result = {
             "tool_use": True,
             "tool_type": None,
             "tool_argument": None,
-            "error_tool_use": True
+            "error_tool_use": True,
+            "tool_start_idx": start,
         }
-
+    print(result)
     return result
 
 def _generate_with_tool(
@@ -273,3 +308,13 @@ def generate_with_tool_async(questions: list, args: GRPOConfig, max_processes: i
             bar.update(1)
             
     return results
+
+
+
+if __name__ == "__main__":
+    example = r'''<tool_call>\n{"name": "python", "arguments": {"code": "navin_hourly_rate_usd = 160 / 32.35\nluka_hourly_rate_usd = 25 / 5.18\nian_hourly_rate_usd = 34 / 6.95\nnavin_total = navin_hourly_rate_usd * 8\nluka_total = luka_hourly_rate_usd * 8\nian_total = ian_hourly_rate_usd * 8\nprint("Navin's total: ", navin_total)\nprint("Luka's total: ", luka_total)\nprint("Ian's total: ",ian_total)"}}</tool_call>\n'''
+    detect = _detect_tool_use(
+        example,
+        prompt_idx=0,
+    )
+    print(detect)
