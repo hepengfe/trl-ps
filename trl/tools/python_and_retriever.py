@@ -15,7 +15,8 @@ import types
 import builtins
 
 # base_model = 'gpt-4o-2024-08-06'
-base_model = 'o3-mini-2025-01-31'
+# base_model = 'o3-mini-2025-01-31'
+base_model = 'gpt-4.1-nano-2025-04-14'
 
 client = openai.OpenAI(
     api_key=os.environ.get("OPENAI_API_KEY", "YOUR_API_KEY"),
@@ -222,11 +223,11 @@ def python_interpreter(code: str) -> str:
     the code's intended behavior.
     """
 
-    code,output, error_output = execute_and_capture(code,client,5)
+    code, output, error_output = execute_and_capture(code,client,5)
     if output:
-        return code,output
+        return code, output
     else:
-        return code,error_output
+        return code, error_output
 
 
 if __name__ == "__main__":

@@ -227,19 +227,31 @@ def generate_with_tool_batch(
                 stats[global_i]["num_python"] += 1
                 code = remove_python_prefix(text=detect["tool_argument"]['code'])
                 try:
-                    _, exec_out = python_interpreter(code)
+                    new_code, exec_out = python_interpreter(code)
                 except Exception as e:
                     print(f"[ERROR] Python execution failed for code:\n{code}")
                     print(e)
                     exec_out = ""
                 
-                contexts[global_i] += (
+                python_start_idx = detect["tool_start_idx"]
+                new_python_code = json.dumps(
+                    {
+                        "name": "python",
+                        "arguments": {
+                            "code": new_code
+                        }
+                    }
+                )
+                contexts[global_i] = (
+                    contexts[global_i][:python_start_idx]
+                    + f"{args.tool_tokens[0]}\n" + new_python_code + f"\n{args.tool_tokens[1]}\n"
                     f"{args.result_tokens[0]}\n" + exec_out + f"\n{args.result_tokens[1]}\n"
                 )
 
             elif tool_type in ("retrieval", "retrieve"):
                 stats[global_i]["num_retrieval"] += 1
                 try:
+                    print(detect["tool_argument"])
                     result = google_retriever(**detect["tool_argument"])
                     result_text = result.response if result else ""
                 except Exception as e:

@@ -60,7 +60,8 @@ def _detect_tool_use(context: str, prompt_idx: int) -> dict:
         "tool_use": False,
         "tool_type": None,
         "tool_argument": None,
-        "error_tool_use": False
+        "error_tool_use": False,
+        "tool_start_idx": None,
     }
 
     generated = context[prompt_idx:]
@@ -94,8 +95,8 @@ def _detect_tool_use(context: str, prompt_idx: int) -> dict:
     
     try:            
         tool_call_raw = tool_call_raw.encode('utf-8').decode('unicode_escape').strip()
-        tool_call_raw = re.sub(r'(?<!\\)\n', r'\\n', tool_call_raw)
-        tool_call_raw = tool_call_raw.replace('“', '\\"').replace('”', '\\"')
+        # tool_call_raw = re.sub(r'(?<!\\)\n', r'\\n', tool_call_raw)
+        # tool_call_raw = tool_call_raw.replace('“', '\\"').replace('”', '\\"')
         
         parsed = json.loads(tool_call_raw)
         result = {
@@ -103,6 +104,7 @@ def _detect_tool_use(context: str, prompt_idx: int) -> dict:
             "tool_type": parsed["name"],
             "tool_argument": parsed["arguments"],
             "error_tool_use": False,
+            "tool_start_idx": start,
         }
         return result
     except json.JSONDecodeError as e:
@@ -118,6 +120,7 @@ def _detect_tool_use(context: str, prompt_idx: int) -> dict:
             "tool_type": "python",
             "tool_argument": {"code": code_match.group(1)},
             "error_tool_use": False,
+            "tool_start_idx": start,
         }
     elif query_match:
         result = {
@@ -125,6 +128,7 @@ def _detect_tool_use(context: str, prompt_idx: int) -> dict:
             "tool_type": "retrieval",
             "tool_argument": {"query": query_match.group(1)},
             "error_tool_use": False,
+            "tool_start_idx": start,
         }
     else:
         result = {
@@ -132,6 +136,7 @@ def _detect_tool_use(context: str, prompt_idx: int) -> dict:
             "tool_type": None,
             "tool_argument": None,
             "error_tool_use": True,
+            "tool_start_idx": start,
         }
     print(result)
     return result
