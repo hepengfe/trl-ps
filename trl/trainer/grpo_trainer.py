@@ -1138,6 +1138,7 @@ class GRPOTrainer(Trainer):
                         if self.accelerator.is_main_process:
                             with profiling_context(self, "vLLM.generate"):
                                 prompts, completions, tool_stats = self._generate_with_tool(all_prompts_text, 20)
+                                print("completions", completions)
                                 
                             completion_ids = self.processing_class(
                                 text=completions
@@ -1157,10 +1158,9 @@ class GRPOTrainer(Trainer):
                 # Broadcast the completions from the main process to all processes, ensuring each process receives its
                 # corresponding slice.
                 completion_ids = broadcast_object_list(completion_ids, from_process=0)
-
                 process_slice = slice(
-                    self.accelerator.process_index * len(completion_ids),
-                    (self.accelerator.process_index + 1) * len(completion_ids),
+                    self.accelerator.process_index * len(prompts_text),
+                    (self.accelerator.process_index + 1) * len(prompts_text),
                 )
                 completion_ids = completion_ids[process_slice]
 
@@ -1209,6 +1209,12 @@ class GRPOTrainer(Trainer):
                 completion_ids = pad(completion_ids, padding_value=self.processing_class.pad_token_id)
                 print(prompt_ids.shape, completion_ids.shape)
 
+            # if self.accelerator.is_main_process:
+            #     import pdb; pdb.set_trace()
+            # self.accelerator.wait_for_everyone()
+
+            print("PROMPTIDS", prompt_ids)
+            print("COMPLETIONIDS", completion_ids)
             prompt_completion_ids = torch.cat([prompt_ids, completion_ids], dim=1)
                 
         else:
