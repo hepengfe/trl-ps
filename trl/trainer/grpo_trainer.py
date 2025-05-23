@@ -1397,6 +1397,8 @@ class GRPOTrainer(Trainer):
             mean_grouped_rewards = rewards[-n_global_prompts:].view(-1, self.num_generations).mean(dim=1)
             std_grouped_rewards = rewards[-n_global_prompts:].view(-1, self.num_generations).std(dim=1)
 
+            mean_grouped_rewards = mean_grouped_rewards.repeat_interleave(self.num_generations, dim=0)
+            std_grouped_rewards = std_grouped_rewards.repeat_interleave(self.num_generations, dim=0)
             # Compute advantages
             for k, vs in saving_idx_map.items():
                 for v in vs:
