@@ -1210,7 +1210,7 @@ class GRPOTrainer(Trainer):
                 prompt_mask = [torch.tensor(ids, device=device) for ids in prompt_mask]
                 prompt_mask = pad(prompt_mask, padding_value=self.processing_class.pad_token_id)
 
-            prompt_completion_ids = torch.cat([prompt_ids, completion_ids], dim=1)   
+            prompt_completion_ids = torch.cat([prompt_ids, completion_ids], dim=1)
         else:
             # Regular generation path
             # TODO: support tools inference for non-vllm case
