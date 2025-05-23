@@ -1307,7 +1307,7 @@ class GRPOTrainer(Trainer):
         else:
             completions = completions_text
 
-        rewards_per_func = torch.zeros(len(prompts), len(self.reward_funcs), device=device)
+        rewards_per_func = torch.zeros(len(prompts_text), len(self.reward_funcs), device=device)
         for i, (reward_func, reward_processing_class, reward_func_name) in enumerate(
             zip(self.reward_funcs, self.reward_processing_classes, self.reward_func_names)
         ):
@@ -1335,12 +1335,9 @@ class GRPOTrainer(Trainer):
                     reward_kwargs = {key: [example[key] for example in inputs] for key in keys}
 
                     if self.tool_use:
-                        prompts_to_calculate_reward = prompts[-n_local_prompts:]
-                        completions_to_calculate_reward = completions[-n_local_prompts:]
+                        # prompts are not needed for any reward funcs used
                         output_reward_func = reward_func(
-                            prompts=prompts_to_calculate_reward,
-                            completions=completions_to_calculate_reward,
-                            **reward_kwargs
+                            completions=completions[-n_local_prompts:], **reward_kwargs
                         )
                         output_reward_func = [
                             output_reward_func[local_i] for i, local_i in enumerate(pidx) for _ in saving_idx_map[i]
@@ -1349,8 +1346,6 @@ class GRPOTrainer(Trainer):
                         output_reward_func = reward_func(prompts=prompts, completions=completions, **reward_kwargs)
                     # Convert None values to NaN
                     output_reward_func = [reward if reward is not None else torch.nan for reward in output_reward_func]
-
-                    print(output_reward_func)
                     rewards_per_func[:, i] = torch.tensor(output_reward_func, dtype=torch.float32, device=device)
 
         # testing saving reward broadcast
