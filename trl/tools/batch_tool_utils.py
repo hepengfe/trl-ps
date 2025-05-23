@@ -299,22 +299,19 @@ def generate_with_tool_batch(
     for i, context in enumerate(contexts):
         completions_to_return.append(context[prompts_len[i]:])
     
-    
     # **IMPORTANT**: The returns are formatted as follows. Suppose there's 3 prompts, and each has 3 saving segments.
     # output0a looks like “thinking, saving”, output1b looks like “saving 1, thinking 2, saving 2", output1c looks like “saving 2, thinking 3, answer”
     # prompts_to_return = [prompts[0], prompts[0], ..., prompts[2], prompts[2], prompts[0], ..., prompts[2]]
     # completions_to_return = [output0a, output0b, ..., output2a, output2b, output0c, ..., output2c]
-    
-    
+
     return prompts_to_return, completions_to_return, stats
     
     # to test RL masking, comment the above return and uncomment the following
     # return [prompts[0], prompts[1]], [example_output1c, example_output2c], stats
     
     # to test inftythink reward broadcasting, comment the above return and uncomment the following
+
     # return [prompts[0], prompts[0], prompts[1], prompts[1], prompts[0], prompts[1]], [example_output1a, example_output1b, example_output2a, example_output2b, example_output1c, example_output2c], stats
-
-
 
 example_output1a = """
 <think>
