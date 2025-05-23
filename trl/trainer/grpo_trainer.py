@@ -1135,35 +1135,32 @@ class GRPOTrainer(Trainer):
                             )
                     else:
                         # tool inference using vllm
-                        all_prompts_text = gather_object(prompts_text)
                         if self.accelerator.is_main_process:
                             with profiling_context(self, "vLLM.generate"):
                                 prompts, completions, tool_stats = self._generate_with_tool(all_prompts_text, 20)
-                                
-                            completion_ids = self.processing_class(
-                                text=completions
-                            )["input_ids"]
-                            completion_ids = [torch.tensor(ids, device=device) for ids in completion_ids]
-                            completion_ids = pad(completion_ids, padding_value=self.processing_class.pad_token_id)
 
-                            # update prompts here according to savings
-                            prompt_ids = self.processing_class(
-                                text=prompts, return_tensors="pt", padding=True, padding_side="left", add_special_tokens=False
-                            )
-                            prompt_ids, prompt_mask = prompt_ids["input_ids"].to(device), prompt_ids["attention_mask"].to(device)
-
-                    
+                            completion_ids = self.processing_class(text=completions)["input_ids"]
+                            prompt_ids, prompt_mask = self.processing_class(text=prompts).values()
                 else:
                     completion_ids = [None] * len(all_prompts_text)
+                    if self.tool_use:
+                        prompt_ids = [None] * len(all_prompts_text)
+                        prompt_mask = [None] * len(all_prompts_text)
+
                 # Broadcast the completions from the main process to all processes, ensuring each process receives its
                 # corresponding slice.
                 completion_ids = broadcast_object_list(completion_ids, from_process=0)
-
                 process_slice = slice(
-                    self.accelerator.process_index * len(completion_ids),
-                    (self.accelerator.process_index + 1) * len(completion_ids),
+                    self.accelerator.process_index * len(prompts_text),
+                    (self.accelerator.process_index + 1) * len(prompts_text),
                 )
                 completion_ids = completion_ids[process_slice]
+                if self.tool_use:
+                    prompt_ids = broadcast_object_list(prompt_ids, from_process=0)
+                    prompt_ids = prompt_ids[process_slice]
+
+                    prompt_mask = broadcast_object_list(prompt_mask, from_process=0)
+                    prompt_mask = prompt_mask[process_slice]
 
             # Generate completions using colocated vLLM instances: each device holds vLLM copy and work on their own batch of prompts
             elif self.vllm_mode == "colocate":
@@ -1203,15 +1200,17 @@ class GRPOTrainer(Trainer):
                     tp_slice = slice(local_rank_in_group * orig_size, (local_rank_in_group + 1) * orig_size)
                     completion_ids = completion_ids[tp_slice]
 
-
             # Pad the completions, and concatenate them with the prompts
-            if not self.tool_use:
-                completion_ids = [torch.tensor(ids, device=device) for ids in completion_ids]
-                completion_ids = pad(completion_ids, padding_value=self.processing_class.pad_token_id)
-                print(prompt_ids.shape, completion_ids.shape)
-                
+            completion_ids = [torch.tensor(ids, device=device) for ids in completion_ids]
+            completion_ids = pad(completion_ids, padding_value=self.processing_class.pad_token_id)
+            if self.tool_use:
+                prompt_ids = [torch.tensor(ids, device=device) for ids in prompt_ids]
+                prompt_ids = pad(prompt_ids, padding_value=self.processing_class.pad_token_id)
+
+                prompt_mask = [torch.tensor(ids, device=device) for ids in prompt_mask]
+                prompt_mask = pad(prompt_mask, padding_value=self.processing_class.pad_token_id)
+
             prompt_completion_ids = torch.cat([prompt_ids, completion_ids], dim=1)
-                
         else:
             # Regular generation path
             # TODO: support tools inference for non-vllm case
