@@ -1396,27 +1396,32 @@ class GRPOTrainer(Trainer):
             # Only compute group stats etc over non-saving prompts
             mean_grouped_rewards = rewards[-n_global_prompts:].view(-1, self.num_generations).mean(dim=1)
             std_grouped_rewards = rewards[-n_global_prompts:].view(-1, self.num_generations).std(dim=1)
+
+            # Compute advantages
+            for k, vs in saving_idx_map.items():
+                for v in vs:
+                    rewards[v] -= mean_grouped_rewards[k]
+                    if self.scale_rewards:
+                        rewards[v] /= (std_grouped_rewards[k] + 1e-4)
+                rewards[-n_global_prompts:][k] -= mean_grouped_rewards[k]
+                if self.scale_rewards:
+                    rewards[-n_global_prompts:][k] /= (std_grouped_rewards[k] + 1e-4)
+
+            # Select local bits
+            idx = [j for i in pidx for j in saving_idx_map[i]]
+            advantages = torch.cat([
+                rewards[idx],
+                rewards[-n_global_prompts:][process_slice],
+            ], dim=0)
         else:
             # Compute grouped-wise rewards
             mean_grouped_rewards = rewards.view(-1, self.num_generations).mean(dim=1)
             std_grouped_rewards = rewards.view(-1, self.num_generations).std(dim=1)
 
-        # Normalize the rewards to compute the advantages
-        mean_grouped_rewards = mean_grouped_rewards.repeat_interleave(self.num_generations, dim=0)
-        std_grouped_rewards = std_grouped_rewards.repeat_interleave(self.num_generations, dim=0)
-    
-        # Slice to keep only the local part of the data
-        if self.tool_use:
-            # TODO: compute advantages when saving
-            s = [advantages[j] for i, local_i in enumerate(pidx) for j in saving_idx_map[i]]
-            if s:
-                advantages = torch.cat([
-                    torch.stack(s, dim=0),
-                    advantages[-n_global_prompts:][process_slice],
-                ], dim=0)
-            else:
-                advantages = advantages[-n_global_prompts:][process_slice]
-        else:
+            # Normalize the rewards to compute the advantages
+            mean_grouped_rewards = mean_grouped_rewards.repeat_interleave(self.num_generations, dim=0)
+            std_grouped_rewards = std_grouped_rewards.repeat_interleave(self.num_generations, dim=0)
+
             advantages = rewards - mean_grouped_rewards
             if self.scale_rewards:
                 advantages = advantages / (std_grouped_rewards + 1e-4)
@@ -1452,9 +1457,14 @@ class GRPOTrainer(Trainer):
 
         # Calculate mean reward per function, but only for samples where the function was applied (non-NaN values)
         for i, reward_func_name in enumerate(self.reward_func_names):
-            mean_rewards = torch.nanmean(rewards_per_func[:, i]).item()
+            if self.tool_use:
+                # Only compute mean/std for non-saving prompts
+                mean_rewards = torch.nanmean(rewards_per_func[-n_global_prompts:, i]).item()
+                std_rewards = nanstd(rewards_per_func[-n_global_prompts:, i]).item()
+            else:
+                mean_rewards = torch.nanmean(rewards_per_func[:, i]).item()
+                std_rewards = nanstd(rewards_per_func[:, i]).item()
             self._metrics[mode][f"rewards/{reward_func_name}/mean"].append(mean_rewards)
-            std_rewards = nanstd(rewards_per_func[:, i]).item()
             self._metrics[mode][f"rewards/{reward_func_name}/std"].append(std_rewards)
         self._metrics[mode]["reward"].append(mean_grouped_rewards.mean().item())
         self._metrics[mode]["reward_std"].append(std_grouped_rewards.mean().item())
