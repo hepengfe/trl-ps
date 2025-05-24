@@ -265,7 +265,11 @@ def generate_with_tool_batch(
 
             elif tool_type == "saving":
                 stats[global_i]["num_saving"] += 1
-                summary = detect["tool_argument"]
+                try:
+                    summary = detect["tool_argument"]["summary"]
+                except Exception as e:
+                    print(e)
+                    summary = ""
                 
                 # bookkeep the old thinking & summary
                 contexts_to_return.append(contexts[global_i] + f"\n{args.eos_token}\n")
