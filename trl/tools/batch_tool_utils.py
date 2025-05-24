@@ -257,7 +257,7 @@ def generate_with_tool_batch(
                     toks = tokenizer(new_text).input_ids
                     n_toks = len(toks) - prompts_len[global_i]
                     tokens_left[global_i] = args.max_completion_length - n_toks
-                    if tokens_left[global_i] < 0:
+                    if tokens_left[global_i] <= 0:
                         done[global_i] = True
                         contexts[global_i] += tokenizer.decode(toks[:prompts_len[global_i] + args.max_completion_length])
                         tokens_left[global_i] = 0
@@ -282,7 +282,7 @@ def generate_with_tool_batch(
                     toks = tokenizer(new_text).input_ids
                     n_toks = len(toks)
                     tokens_left[global_i] -= n_toks
-                    if tokens_left[global_i] < 0:
+                    if tokens_left[global_i] <= 0:
                         done[global_i] = True
                         take = tokens_left[global_i] * -1
                         contexts[global_i] += tokenizer.decode(toks[:take])
