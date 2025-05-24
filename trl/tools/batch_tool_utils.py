@@ -121,6 +121,7 @@ def generate_with_tool_batch(
     prompts: List[str],
     args: GRPOConfig,
     llm: LLM = None,
+    tokenizer = None,
 ) -> Tuple[List[str], List[str], List[Dict[str, int]]]:
     """
     Parameters
@@ -249,6 +250,9 @@ def generate_with_tool_batch(
                     + f"{args.tool_tokens[0]}\n" + new_python_code + f"\n{args.tool_tokens[1]}\n"
                     f"{args.result_tokens[0]}\n" + exec_out + f"\n{args.result_tokens[1]}\n"
                 )
+                toks = len(tokenizer(contexts[global_i]).input_ids)
+                stats[global_i]["generated_tokens"] += toks
+                tokens_left[global_i] -= toks
 
             elif tool_type in ("retrieval", "retrieve"):
                 stats[global_i]["num_retrieval"] += 1
@@ -264,16 +268,19 @@ def generate_with_tool_batch(
                 contexts[global_i] += (
                     f"{args.result_tokens[0]}\n" + result_text + f"\n{args.result_tokens[1]}\n"
                 )
+                toks = len(tokenizer(f"{args.result_tokens[0]}\n" + result_text + f"\n{args.result_tokens[1]}\n").input_ids)
+                stats[global_i]["generated_tokens"] += toks
+                tokens_left[global_i] -= toks
 
             elif tool_type == "saving":
                 stats[global_i]["num_saving"] += 1
                 summary = detect["tool_argument"]
-                
+
                 # bookkeep the old thinking & summary
                 contexts_to_return.append(contexts[global_i] + f"\n{args.eos_token}\n")
                 completions_to_return.append(contexts[global_i][prompts_len[global_i]:] + f"\n{args.eos_token}\n")
                 prompts_to_return.append(contexts[global_i][:prompts_len[global_i]])
-                
+
                 # Replace all old thinking with the summary
                 contexts[global_i] = (
                     contexts[global_i][: prompts_len[global_i]]
@@ -281,6 +288,8 @@ def generate_with_tool_batch(
                     + summary
                     + f"\n{args.saving_tokens[1]}\n"
                 )
+                tokens_left[global_i] = args.max_completion_length
+                prompts_len[global_i] = len(contexts[global_i])
                 
             tool_duration = time.time() - tool_start
             print(f"[Time] {tool_type} tool call took {tool_duration:.2f} seconds")

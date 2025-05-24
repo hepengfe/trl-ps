@@ -701,7 +701,7 @@ class GRPOTrainer(Trainer):
                 added = [tok for tok in special
                         if self.processing_class.convert_tokens_to_ids(tok) is None]
                 print(f"Token list {added} is not in the tokenizer.")
-                
+
                 if len(added) > 0:                              # add if not already present
                     # self.processing_class.add_tokens(added, special_tokens=True)
                     self.processing_class.add_tokens(added)
@@ -1044,7 +1044,7 @@ class GRPOTrainer(Trainer):
         if self.args.async_infer:
             return generate_with_tool_async(questions, self.args)
         else:
-            return generate_with_tool_batch(questions, self.args)
+            return generate_with_tool_batch(questions, self.args, self.processing_class)
         
     def _build_tool_mask_for_token(self, mask: torch.Tensor, comp_ids: torch.Tensor, token_pair: List[str]) -> torch.Tensor:
         device = self.accelerator.device
@@ -1237,10 +1237,10 @@ class GRPOTrainer(Trainer):
             completion_ids = pad(completion_ids, padding_value=self.processing_class.pad_token_id)
             if self.tool_use:
                 prompt_ids = [torch.tensor(ids, device=device) for ids in prompt_ids]
-                prompt_ids = pad(prompt_ids, padding_value=self.processing_class.pad_token_id)
+                prompt_ids = pad(prompt_ids, padding_value=self.processing_class.pad_token_id, padding_side="left")
 
                 prompt_mask = [torch.tensor(ids, device=device) for ids in prompt_mask]
-                prompt_mask = pad(prompt_mask, padding_value=self.processing_class.pad_token_id)
+                prompt_mask = pad(prompt_mask, padding_value=0, padding_side="left")
 
             prompt_completion_ids = torch.cat([prompt_ids, completion_ids], dim=1)
         else:
