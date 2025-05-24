@@ -235,7 +235,8 @@ def generate_with_tool_batch(
                     print(f"[ERROR] Python execution failed for code:\n{code}")
                     print(e)
                     exec_out = ""
-
+                    new_code = detect["tool_argument"]['code']
+                
                 python_start_idx = detect["tool_start_idx"]
                 new_python_code = json.dumps(
                     {
@@ -274,7 +275,11 @@ def generate_with_tool_batch(
 
             elif tool_type == "saving":
                 stats[global_i]["num_saving"] += 1
-                summary = detect["tool_argument"]
+                try:
+                    summary = detect["tool_argument"]["summary"]
+                except Exception as e:
+                    print(e)
+                    summary = ""
 
                 # bookkeep the old thinking & summary
                 contexts_to_return.append(contexts[global_i] + f"\n{args.eos_token}\n")
