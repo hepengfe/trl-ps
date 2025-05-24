@@ -705,6 +705,7 @@ class GRPOTrainer(Trainer):
                 if len(added) > 0:                              # add if not already present
                     # self.processing_class.add_tokens(added, special_tokens=True)
                     self.processing_class.add_tokens(added)
+                    # TODO: Could throw error if vocab embedding not large enough
                     # self.model.resize_token_embeddings(len(self.processing_class))
                 # Cache their ids for quick lookup later
                 print(self.processing_class.convert_tokens_to_ids(args.saving_tokens[0]))

@@ -223,7 +223,7 @@ def generate_with_tool_batch(
             # ------------------------------------------------------------------
             tool_type = detect["tool_type"]
             # contexts[global_i] += f"\n{args.result_tokens[0]}\n"
-            
+
             tool_start = time.time()
 
             if tool_type == "python":
@@ -235,7 +235,7 @@ def generate_with_tool_batch(
                     print(f"[ERROR] Python execution failed for code:\n{code}")
                     print(e)
                     exec_out = ""
-                
+
                 python_start_idx = detect["tool_start_idx"]
                 new_python_code = json.dumps(
                     {
