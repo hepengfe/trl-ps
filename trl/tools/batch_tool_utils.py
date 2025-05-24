@@ -232,6 +232,7 @@ def generate_with_tool_batch(
                     print(f"[ERROR] Python execution failed for code:\n{code}")
                     print(e)
                     exec_out = ""
+                    new_code = detect["tool_argument"]['code']
                 
                 python_start_idx = detect["tool_start_idx"]
                 new_python_code = json.dumps(
