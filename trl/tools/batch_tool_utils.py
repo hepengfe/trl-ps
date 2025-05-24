@@ -202,18 +202,20 @@ def generate_with_tool_batch(
             # 3. Termination: no tool call OR ran out of budget
             # ------------------------------------------------------------------
             if not detect["tool_use"]:
-                # Case 1: token exceeded limit for current prompt
-                # Case 2: current prompt finished naturally
-                if tokens_left[global_i] <= 0:
-                    contexts[global_i] += "\n</think>\n**Final Answer**\n"
-                    done[global_i] = True
-                    continue
-                elif "Final Answer" in contexts[global_i]:
-                    done[global_i] = True
-                    continue
-                # Case 3: One prompt in batch stopped because of length limit, or some unknown issue
-                else:
-                    continue
+                done[global_i] = True
+                continue
+                # # Case 1: token exceeded limit for current prompt
+                # # Case 2: current prompt finished naturally
+                # if tokens_left[global_i] <= 0:
+                #     contexts[global_i] += "\n</think>\n**Final Answer**\n"
+                #     done[global_i] = True
+                #     continue
+                # elif "Final Answer" in contexts[global_i]:
+                #     done[global_i] = True
+                #     continue
+                # # Case 3: One prompt in batch stopped because of length limit, or some unknown issue
+                # else:
+                #     continue
 
             # ------------------------------------------------------------------
             # 4. Execute tool & insert result
@@ -284,15 +286,15 @@ def generate_with_tool_batch(
             print(f"[Time] {tool_type} tool call took {tool_duration:.2f} seconds")
             
     # one more short call to get the final answer
-    _, final_answer = _make_tool_inference_requests_batch(
-        contexts,
-        max_tokens=128,
-        args=args,
-        stop=[args.eos_token],
-        llm=llm,
-    )
-    for i in range(len(contexts)):
-        contexts[i] += final_answer[i] + f"\n{args.eos_token}"
+    # _, final_answer = _make_tool_inference_requests_batch(
+    #     contexts,
+    #     max_tokens=128,
+    #     args=args,
+    #     stop=[args.eos_token],
+    #     llm=llm,
+    # )
+    # for i in range(len(contexts)):
+    #     contexts[i] += final_answer[i] + f"\n{args.eos_token}"
 
     contexts_to_return.extend(contexts)
     prompts_to_return.extend(prompts)
