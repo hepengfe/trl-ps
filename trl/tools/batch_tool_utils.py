@@ -121,6 +121,7 @@ def generate_with_tool_batch(
     prompts: List[str],
     args: GRPOConfig,
     llm: LLM = None,
+    tokenizer = None,
 ) -> Tuple[List[str], List[str], List[Dict[str, int]]]:
     """
     Parameters
@@ -202,25 +203,27 @@ def generate_with_tool_batch(
             # 3. Termination: no tool call OR ran out of budget
             # ------------------------------------------------------------------
             if not detect["tool_use"]:
-                # Case 1: token exceeded limit for current prompt
-                # Case 2: current prompt finished naturally
-                if tokens_left[global_i] <= 0:
-                    contexts[global_i] += "\n</think>\n**Final Answer**\n"
-                    done[global_i] = True
-                    continue
-                elif "Final Answer" in contexts[global_i]:
-                    done[global_i] = True
-                    continue
-                # Case 3: One prompt in batch stopped because of length limit, or some unknown issue
-                else:
-                    continue
+                done[global_i] = True
+                continue
+                # # Case 1: token exceeded limit for current prompt
+                # # Case 2: current prompt finished naturally
+                # if tokens_left[global_i] <= 0:
+                #     contexts[global_i] += "\n</think>\n**Final Answer**\n"
+                #     done[global_i] = True
+                #     continue
+                # elif "Final Answer" in contexts[global_i]:
+                #     done[global_i] = True
+                #     continue
+                # # Case 3: One prompt in batch stopped because of length limit, or some unknown issue
+                # else:
+                #     continue
 
             # ------------------------------------------------------------------
             # 4. Execute tool & insert result
             # ------------------------------------------------------------------
             tool_type = detect["tool_type"]
             # contexts[global_i] += f"\n{args.result_tokens[0]}\n"
-            
+
             tool_start = time.time()
 
             if tool_type == "python":
@@ -248,6 +251,9 @@ def generate_with_tool_batch(
                     + f"{args.tool_tokens[0]}\n" + new_python_code + f"\n{args.tool_tokens[1]}\n"
                     f"{args.result_tokens[0]}\n" + exec_out + f"\n{args.result_tokens[1]}\n"
                 )
+                toks = len(tokenizer(contexts[global_i]).input_ids)
+                stats[global_i]["generated_tokens"] += toks
+                tokens_left[global_i] -= toks
 
             elif tool_type in ("retrieval", "retrieve"):
                 stats[global_i]["num_retrieval"] += 1
@@ -263,6 +269,9 @@ def generate_with_tool_batch(
                 contexts[global_i] += (
                     f"{args.result_tokens[0]}\n" + result_text + f"\n{args.result_tokens[1]}\n"
                 )
+                toks = len(tokenizer(f"{args.result_tokens[0]}\n" + result_text + f"\n{args.result_tokens[1]}\n").input_ids)
+                stats[global_i]["generated_tokens"] += toks
+                tokens_left[global_i] -= toks
 
             elif tool_type == "saving":
                 stats[global_i]["num_saving"] += 1
@@ -271,12 +280,12 @@ def generate_with_tool_batch(
                 except Exception as e:
                     print(e)
                     summary = ""
-                
+
                 # bookkeep the old thinking & summary
                 contexts_to_return.append(contexts[global_i] + f"\n{args.eos_token}\n")
                 completions_to_return.append(contexts[global_i][prompts_len[global_i]:] + f"\n{args.eos_token}\n")
                 prompts_to_return.append(contexts[global_i][:prompts_len[global_i]])
-                
+
                 # Replace all old thinking with the summary
                 contexts[global_i] = (
                     contexts[global_i][: prompts_len[global_i]]
@@ -284,42 +293,41 @@ def generate_with_tool_batch(
                     + summary
                     + f"\n{args.saving_tokens[1]}\n"
                 )
+                tokens_left[global_i] = args.max_completion_length
+                prompts_len[global_i] = len(contexts[global_i])
                 
             tool_duration = time.time() - tool_start
             print(f"[Time] {tool_type} tool call took {tool_duration:.2f} seconds")
             
     # one more short call to get the final answer
-    _, final_answer = _make_tool_inference_requests_batch(
-        contexts,
-        max_tokens=128,
-        args=args,
-        stop=[args.eos_token],
-        llm=llm,
-    )
-    for i in range(len(contexts)):
-        contexts[i] += final_answer[i] + f"\n{args.eos_token}"
+    # _, final_answer = _make_tool_inference_requests_batch(
+    #     contexts,
+    #     max_tokens=128,
+    #     args=args,
+    #     stop=[args.eos_token],
+    #     llm=llm,
+    # )
+    # for i in range(len(contexts)):
+    #     contexts[i] += final_answer[i] + f"\n{args.eos_token}"
 
     contexts_to_return.extend(contexts)
     prompts_to_return.extend(prompts)
     for i, context in enumerate(contexts):
         completions_to_return.append(context[prompts_len[i]:])
     
-    
     # **IMPORTANT**: The returns are formatted as follows. Suppose there's 3 prompts, and each has 3 saving segments.
     # output0a looks like “thinking, saving”, output1b looks like “saving 1, thinking 2, saving 2", output1c looks like “saving 2, thinking 3, answer”
     # prompts_to_return = [prompts[0], prompts[0], ..., prompts[2], prompts[2], prompts[0], ..., prompts[2]]
     # completions_to_return = [output0a, output0b, ..., output2a, output2b, output0c, ..., output2c]
-    
-    
+
     return prompts_to_return, completions_to_return, stats
     
     # to test RL masking, comment the above return and uncomment the following
     # return [prompts[0], prompts[1]], [example_output1c, example_output2c], stats
     
     # to test inftythink reward broadcasting, comment the above return and uncomment the following
+
     # return [prompts[0], prompts[0], prompts[1], prompts[1], prompts[0], prompts[1]], [example_output1a, example_output1b, example_output2a, example_output2b, example_output1c, example_output2c], stats
-
-
 
 example_output1a = """
 <think>

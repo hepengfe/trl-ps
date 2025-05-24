@@ -701,16 +701,16 @@ class GRPOTrainer(Trainer):
                 added = [tok for tok in special
                         if self.processing_class.convert_tokens_to_ids(tok) is None]
                 print(f"Token list {added} is not in the tokenizer.")
-                
+
                 if len(added) > 0:                              # add if not already present
                     # self.processing_class.add_tokens(added, special_tokens=True)
                     self.processing_class.add_tokens(added)
+                    # TODO: Could throw error if vocab embedding not large enough
                     # self.model.resize_token_embeddings(len(self.processing_class))
                 # Cache their ids for quick lookup later
                 print(self.processing_class.convert_tokens_to_ids(args.saving_tokens[0]))
                 print(self.processing_class.convert_tokens_to_ids(args.saving_tokens[1]))
 
-                
 
             # vLLM specific sampling arguments
             self.guided_decoding_regex = args.vllm_guided_decoding_regex
@@ -1045,7 +1045,7 @@ class GRPOTrainer(Trainer):
         if self.args.async_infer:
             return generate_with_tool_async(questions, self.args)
         else:
-            return generate_with_tool_batch(questions, self.args)
+            return generate_with_tool_batch(questions, self.args, self.processing_class)
         
     def _build_tool_mask_for_token(self, mask: torch.Tensor, comp_ids: torch.Tensor, token_pair: List[str]) -> torch.Tensor:
         device = self.accelerator.device
@@ -1137,30 +1137,63 @@ class GRPOTrainer(Trainer):
                         # tool inference using vllm
                         if self.accelerator.is_main_process:
                             with profiling_context(self, "vLLM.generate"):
-                                prompts, completions, tool_stats = self._generate_with_tool(all_prompts_text, 20)
-
+                                prompts, completions, tool_stats = self._generate_with_tool(all_prompts_text, 20)                                
+                            
+                            # completion_ids_ks = self.processing_class(text=list(completions.keys()))["input_ids"]
+                            # completion_ids_vs = self.processing_class(text=[v for x in completions.values() for v in x])["input_ids"]
                             completion_ids = self.processing_class(text=completions)["input_ids"]
                             prompt_ids, prompt_mask = self.processing_class(text=prompts).values()
+                            n_prompts = [len(prompts)]
+                            # vs = [len(v) for v in completions.values()]
                 else:
                     completion_ids = [None] * len(all_prompts_text)
-                    if self.tool_use:
-                        prompt_ids = [None] * len(all_prompts_text)
-                        prompt_mask = [None] * len(all_prompts_text)
+
+                # Account for new saving prompts
+                if self.tool_use:
+                    if not(self.accelerator.is_main_process):
+                        n_prompts = [None]
+                    n_prompts = broadcast_object_list(n_prompts, from_process=0)
+                    if not(self.accelerator.is_main_process):
+                        completion_ids = [None] * n_prompts[0]
+                        prompt_ids = [None] * n_prompts[0]
+                        prompt_mask = [None] * n_prompts[0]
 
                 # Broadcast the completions from the main process to all processes, ensuring each process receives its
-                # corresponding slice.
-                completion_ids = broadcast_object_list(completion_ids, from_process=0)
+                # corresponding slice.                
+                n_local_prompts = len(prompts_text)
+                n_global_prompts = len(all_prompts_text)
+                completion_ids_all = broadcast_object_list(completion_ids, from_process=0)
                 process_slice = slice(
-                    self.accelerator.process_index * len(prompts_text),
-                    (self.accelerator.process_index + 1) * len(prompts_text),
+                    self.accelerator.process_index * n_local_prompts,
+                    (self.accelerator.process_index + 1) * n_local_prompts,
                 )
-                completion_ids = completion_ids[process_slice]
+                completion_ids = completion_ids[-n_global_prompts:][process_slice]
+                # Add saving prompts which are prepended to the completions
                 if self.tool_use:
-                    prompt_ids = broadcast_object_list(prompt_ids, from_process=0)
-                    prompt_ids = prompt_ids[process_slice]
+                    # Create dict mapping from prompt idx to all saving idx for it
+                    saving_idx_map = {i: [] for i in range(n_global_prompts)}
+                    idx = 0
+                    for i, c in enumerate(completion_ids_all[-n_global_prompts:]):
+                        # Check if continuation has saving
+                        if self.processing_class.convert_tokens_to_ids(self.args.saving_tokens[0]) in c:
+                            # Check how many savings
+                            saving_idx_map[i].append(idx) # first one has no saving token but the tool call
+                            idx += 1
+                            while self.processing_class.convert_tokens_to_ids(self.args.saving_tokens[0]) in completion_ids_all[idx]:
+                                saving_idx_map[i].append(idx)
+                                idx += 1
+                                if idx >= len(completion_ids_all[:-n_global_prompts]):
+                                    break
 
-                    prompt_mask = broadcast_object_list(prompt_mask, from_process=0)
-                    prompt_mask = prompt_mask[process_slice]
+                    pidx = list(range(self.accelerator.process_index * n_local_prompts, (self.accelerator.process_index + 1) * n_local_prompts))
+
+                    completion_ids = [completion_ids_all[j] for i in pidx for j in saving_idx_map[i]] + completion_ids
+                                    
+                    prompt_ids_all = broadcast_object_list(prompt_ids, from_process=0)
+                    prompt_ids = [prompt_ids_all[j] for i in pidx for j in saving_idx_map[i]] + prompt_ids_all[-n_global_prompts:][process_slice]
+
+                    prompt_mask_all = broadcast_object_list(prompt_mask, from_process=0)
+                    prompt_mask = [prompt_mask_all[j] for i in pidx for j in saving_idx_map[i]] + prompt_mask_all[-n_global_prompts:][process_slice]
 
             # Generate completions using colocated vLLM instances: each device holds vLLM copy and work on their own batch of prompts
             elif self.vllm_mode == "colocate":
@@ -1205,10 +1238,10 @@ class GRPOTrainer(Trainer):
             completion_ids = pad(completion_ids, padding_value=self.processing_class.pad_token_id)
             if self.tool_use:
                 prompt_ids = [torch.tensor(ids, device=device) for ids in prompt_ids]
-                prompt_ids = pad(prompt_ids, padding_value=self.processing_class.pad_token_id)
+                prompt_ids = pad(prompt_ids, padding_value=self.processing_class.pad_token_id, padding_side="left")
 
                 prompt_mask = [torch.tensor(ids, device=device) for ids in prompt_mask]
-                prompt_mask = pad(prompt_mask, padding_value=self.processing_class.pad_token_id)
+                prompt_mask = pad(prompt_mask, padding_value=0, padding_side="left")
 
             prompt_completion_ids = torch.cat([prompt_ids, completion_ids], dim=1)
         else:
@@ -1275,7 +1308,7 @@ class GRPOTrainer(Trainer):
         else:
             completions = completions_text
 
-        rewards_per_func = torch.zeros(len(prompts), len(self.reward_funcs), device=device)
+        rewards_per_func = torch.zeros(len(prompts_text), len(self.reward_funcs), device=device)
         for i, (reward_func, reward_processing_class, reward_func_name) in enumerate(
             zip(self.reward_funcs, self.reward_processing_classes, self.reward_func_names)
         ):
@@ -1303,26 +1336,17 @@ class GRPOTrainer(Trainer):
                     reward_kwargs = {key: [example[key] for example in inputs] for key in keys}
 
                     if self.tool_use:
-                        prompts_to_calculate_reward = prompts[-len(inputs):]
-                        completions_to_calculate_reward = completions[-len(inputs):]
-                        tmp_reward_func = reward_func(
-                            prompts=prompts_to_calculate_reward, 
-                            completions=completions_to_calculate_reward, 
-                            **reward_kwargs
+                        # prompts are not needed for any reward funcs used
+                        output_reward_func = reward_func(
+                            completions=completions[-n_local_prompts:], **reward_kwargs
                         )
-                        tmp_idx = -1
-                        output_reward_func = []
-                        for c in completions[:-len(inputs)]:
-                            if "<saving>" not in str(c):
-                                tmp_idx += 1
-                            output_reward_func.append(tmp_reward_func[tmp_idx])  # broadcast reward to partial / saving-only steps
-                        output_reward_func.extend(tmp_reward_func)
+                        output_reward_func = [
+                            output_reward_func[local_i] for i, local_i in enumerate(pidx) for _ in saving_idx_map[i]
+                        ] + output_reward_func
                     else:
                         output_reward_func = reward_func(prompts=prompts, completions=completions, **reward_kwargs)
                     # Convert None values to NaN
                     output_reward_func = [reward if reward is not None else torch.nan for reward in output_reward_func]
-
-                    print(output_reward_func)
                     rewards_per_func[:, i] = torch.tensor(output_reward_func, dtype=torch.float32, device=device)
 
         # testing saving reward broadcast
@@ -1364,23 +1388,47 @@ class GRPOTrainer(Trainer):
         # Apply weights to each reward function's output and sum
         rewards = (rewards_per_func * self.reward_weights.to(device).unsqueeze(0)).nansum(dim=1)
 
-        # Compute grouped-wise rewards
-        mean_grouped_rewards = rewards.view(-1, self.num_generations).mean(dim=1)
-        std_grouped_rewards = rewards.view(-1, self.num_generations).std(dim=1)
+        if self.tool_use:
+            # Only compute group stats etc over non-saving prompts
+            mean_grouped_rewards = rewards[-n_global_prompts:].view(-1, self.num_generations).mean(dim=1)
+            std_grouped_rewards = rewards[-n_global_prompts:].view(-1, self.num_generations).std(dim=1)
 
-        # Normalize the rewards to compute the advantages
-        mean_grouped_rewards = mean_grouped_rewards.repeat_interleave(self.num_generations, dim=0)
-        std_grouped_rewards = std_grouped_rewards.repeat_interleave(self.num_generations, dim=0)
-        advantages = rewards - mean_grouped_rewards
-        if self.scale_rewards:
-            advantages = advantages / (std_grouped_rewards + 1e-4)
+            mean_grouped_rewards = mean_grouped_rewards.repeat_interleave(self.num_generations, dim=0)
+            std_grouped_rewards = std_grouped_rewards.repeat_interleave(self.num_generations, dim=0)
+            # Compute advantages
+            for k, vs in saving_idx_map.items():
+                for v in vs:
+                    rewards[v] -= mean_grouped_rewards[k]
+                    if self.scale_rewards:
+                        rewards[v] /= (std_grouped_rewards[k] + 1e-4)
+                rewards[-n_global_prompts:][k] -= mean_grouped_rewards[k]
+                if self.scale_rewards:
+                    rewards[-n_global_prompts:][k] /= (std_grouped_rewards[k] + 1e-4)
 
-        # Slice to keep only the local part of the data
-        process_slice = slice(
-            self.accelerator.process_index * len(prompts),
-            (self.accelerator.process_index + 1) * len(prompts),
-        )
-        advantages = advantages[process_slice]
+            # Select local bits
+            idx = [j for i in pidx for j in saving_idx_map[i]]
+            advantages = torch.cat([
+                rewards[idx],
+                rewards[-n_global_prompts:][process_slice],
+            ], dim=0)
+        else:
+            # Compute grouped-wise rewards
+            mean_grouped_rewards = rewards.view(-1, self.num_generations).mean(dim=1)
+            std_grouped_rewards = rewards.view(-1, self.num_generations).std(dim=1)
+
+            # Normalize the rewards to compute the advantages
+            mean_grouped_rewards = mean_grouped_rewards.repeat_interleave(self.num_generations, dim=0)
+            std_grouped_rewards = std_grouped_rewards.repeat_interleave(self.num_generations, dim=0)
+
+            advantages = rewards - mean_grouped_rewards
+            if self.scale_rewards:
+                advantages = advantages / (std_grouped_rewards + 1e-4)
+
+            process_slice = slice(
+                self.accelerator.process_index * len(prompts),
+                (self.accelerator.process_index + 1) * len(prompts),
+            )
+            advantages = advantages[process_slice]
 
         # Log the metrics
         if mode == "train":
@@ -1407,9 +1455,14 @@ class GRPOTrainer(Trainer):
 
         # Calculate mean reward per function, but only for samples where the function was applied (non-NaN values)
         for i, reward_func_name in enumerate(self.reward_func_names):
-            mean_rewards = torch.nanmean(rewards_per_func[:, i]).item()
+            if self.tool_use:
+                # Only compute mean/std for non-saving prompts
+                mean_rewards = torch.nanmean(rewards_per_func[-n_global_prompts:, i]).item()
+                std_rewards = nanstd(rewards_per_func[-n_global_prompts:, i]).item()
+            else:
+                mean_rewards = torch.nanmean(rewards_per_func[:, i]).item()
+                std_rewards = nanstd(rewards_per_func[:, i]).item()
             self._metrics[mode][f"rewards/{reward_func_name}/mean"].append(mean_rewards)
-            std_rewards = nanstd(rewards_per_func[:, i]).item()
             self._metrics[mode][f"rewards/{reward_func_name}/std"].append(std_rewards)
         self._metrics[mode]["reward"].append(mean_grouped_rewards.mean().item())
         self._metrics[mode]["reward_std"].append(std_grouped_rewards.mean().item())
