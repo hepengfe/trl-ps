@@ -107,7 +107,7 @@ def _detect_tool_use(context: str, prompt_idx: int) -> dict:
         }
         return result
     except json.JSONDecodeError as e:
-        print(e)
+        print(f"Failed to parse {tool_call_raw} due to {e}")
     
     # if json parsing fails, fall back to regex
     code_match = re.search(r'"code"\s*:\s*"(.+?)"\s*}', tool_call_raw, re.DOTALL)
