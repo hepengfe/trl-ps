@@ -72,14 +72,13 @@ def _detect_tool_use(context: str, prompt_idx: int) -> dict:
     
     # Find the last occurrence of tool calling
     start = generated.rfind(start_tag)
+    # no tool call detected
+    if start == -1:
+        return result
     end = generated.rfind(end_tag, start)
     
     # Find the last occurrence of tool result
     last_response_idx = generated.rfind(response_tag, start)
-    
-    # no tool call detected
-    if start == -1:
-        return result
     
     # last tool call is processed
     if start != -1 and last_response_idx != -1:
