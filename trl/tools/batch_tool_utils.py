@@ -330,7 +330,7 @@ def generate_with_tool_batch(
                     + summary
                     + f"\n{args.saving_tokens[1]}\n"
                 ) # TODO: Maybe restrict to args. max prompt len
-                if prompts[global_i].endswith("<think>\n")
+                if prompts[global_i].endswith("<think>\n"):
                     contexts[global_i] += "<think>\n"
                 tokens_left[global_i] = args.max_completion_length
                 prompts[global_i] = contexts[global_i]

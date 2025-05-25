@@ -106,7 +106,7 @@ def _detect_tool_use(context: str, prompt_idx: int) -> dict:
             "tool_start_idx": start,
         }
         return result
-    except json.JSONDecodeError as e:
+    except Exception as e: # json.JSONDecodeError or UnicodeDecodeError
         print(f"Failed to parse {tool_call_raw} due to {e}")
     
     # if json parsing fails, fall back to regex
