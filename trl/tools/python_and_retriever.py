@@ -14,18 +14,20 @@ import threading
 import types
 import builtins
 
+from .key_rotator import google_key_rotator, get_openai_client
+
 # base_model = 'gpt-4o-2024-08-06'
 # base_model = 'o3-mini-2025-01-31'
 base_model = 'gpt-4.1-nano-2025-04-14'
 
-client = openai.OpenAI(
-    api_key=os.environ.get("OPENAI_API_KEY", "YOUR_API_KEY"),
+# client = openai.OpenAI(
+#     api_key=os.environ.get("OPENAI_API_KEY", "YOUR_API_KEY"),
     # base_url=os.environ.get("OPENAI_BASE_URL", "https://hk.xty.app/v1"),
     # http_client=httpx.Client(
     #     base_url="https://hk.xty.app/v1",
     #     follow_redirects=True,
     # ),
-)
+# )
 
 def count_tokens(text, model_name=base_model):
     encoding = tiktoken.encoding_for_model(model_name)
@@ -56,17 +58,24 @@ def polish_query(context,query):
     return completion.choices[0].message.content.strip()
 
 
-def google_retriever(query,retrieve_websites = 2):
+def google_retriever(query, retrieve_websites = 2):
     '''
     query[str]: 
     ''' 
     base_url = 'https://www.googleapis.com/customsearch/v1'
+    google_key = google_key_rotator.next()
+    # params = {
+    #         'key': '',
+    #         'cx': '',
+    #         'q': query,
+    #         'num': retrieve_websites # The number of websites you want.
+    # }
     params = {
-            'key': '',
+            'key': google_key,
             'cx': '',
             'q': query,
-            'num':retrieve_websites # The number of websites you want.
-    }
+            'num': retrieve_websites # The number of websites you want.
+    }    
     #TODO: There might some connection error when we call httpx.get. Simply recall will resolve this error.
     response = httpx.get(base_url, params=params,timeout=5)
     response.raise_for_status()
@@ -79,9 +88,8 @@ def google_retriever(query,retrieve_websites = 2):
     #         follow_redirects=True,
     #     )
         
-    urls = []
-    for item in data.get('items', []):
-        urls.append(item.get('link', ''))
+    urls = [item.get('link', '') for item in data.get('items', [])]
+    
     for i in range(retrieve_websites):
         try:
             document = SimpleWebPageReader(html_to_text=True).load_data(
@@ -222,8 +230,8 @@ def python_interpreter(code: str) -> str:
     an analysis report explaining the code's functionality and how the output reflects 
     the code's intended behavior.
     """
-
-    code, output, error_output = execute_and_capture(code,client,5)
+    client = get_openai_client()
+    code, output, error_output = execute_and_capture(code, client, 5)
     if output:
         return code, output
     else:

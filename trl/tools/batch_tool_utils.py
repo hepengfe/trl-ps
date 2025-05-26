@@ -15,12 +15,6 @@ Key ideas
         final answer and mark it *done*.
 * Loop until every prompt is *done*.
 
-Assumptions
------------
-* `_detect_tool_use`, `python_interpreter`, `google_retriever`, and
-  `remove_python_prefix` are kept unchanged.
-* vLLM server is **stream-free**; if you stream, swap the simple POST for a
-  streaming iterator.
 """
 
 from __future__ import annotations
