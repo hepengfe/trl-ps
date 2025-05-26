@@ -200,11 +200,7 @@ def generate_with_tool_batch(
             # ------------------------------------------------------------------
             # 2. Look for tool calls
             # ------------------------------------------------------------------
-            prompt_idx = len(contexts[global_i]) - len(comp_text)
-            assert prompt_ids == prompts_len[global_i], (
-                f"Expected prompt_idx {prompts_len[global_i]} for global_i {global_i}, "
-                f"but got {prompt_idx} for context: {contexts[global_i]}"
-            )
+            prompt_idx = len(contexts[global_i]) - len(comp_text) # != prompts_len[global_i]; as may include prior tool calls
             detect = _detect_tool_use(contexts[global_i], prompt_idx=prompts_len[global_i])
 
             if not detect["tool_use"]:
@@ -360,10 +356,6 @@ def generate_with_tool_batch(
     # output0a looks like “thinking, saving”, output1b looks like “saving 1, thinking 2, saving 2", output1c looks like “saving 2, thinking 3, answer”
     # prompts_to_return = [prompts[0], prompts[0], ..., prompts[2], prompts[2], prompts[0], ..., prompts[2]]
     # completions_to_return = [output0a, output0b, ..., output2a, output2b, output0c, ..., output2c]
-    # for c in completions_to_return:
-    #     if "<think>" not in c:
-    #         print(f"[ERROR] think not found in completion: {c}")
-    #         import pdb; pdb.set_trace()
 
     return prompts_to_return, completions_to_return, stats
     
