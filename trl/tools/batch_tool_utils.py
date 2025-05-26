@@ -184,6 +184,7 @@ def generate_with_tool_batch(
                 comp_text += args.eos_token
                 contexts[global_i] += comp_text
                 done[global_i] = True
+                ### TODO: This is a bug in case of saving tool call
                 continue
             elif last_tok == args.result_tokens[0]:
                 # comp_text += args.result_tokens[0] # will be added later
@@ -356,7 +357,10 @@ def generate_with_tool_batch(
     # output0a looks like “thinking, saving”, output1b looks like “saving 1, thinking 2, saving 2", output1c looks like “saving 2, thinking 3, answer”
     # prompts_to_return = [prompts[0], prompts[0], ..., prompts[2], prompts[2], prompts[0], ..., prompts[2]]
     # completions_to_return = [output0a, output0b, ..., output2a, output2b, output0c, ..., output2c]
-
+    # for p,c in zip(prompts_to_return, completions_to_return):
+    #     if ("<think>" not in c) and ("saving" not in p):
+    #         print(f"[ERROR] think not found in completion: {c}")
+    #         import pdb; pdb.set_trace()
     return prompts_to_return, completions_to_return, stats
     
     # to test RL masking, comment the above return and uncomment the following
