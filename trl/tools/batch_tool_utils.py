@@ -60,7 +60,7 @@ def _make_tool_inference_requests_batch(
     matching order.
     """
     if args.vllm_mode == "server":
-        url = f"http://{args.vllm_server_host}:{args.vllm_server_port}/generate/"
+        url = f"http://{args.vllm_server_host}:{args.vllm_server_port}/generate/"        
         resp = requests.post(
             url,
             json={
@@ -74,6 +74,7 @@ def _make_tool_inference_requests_batch(
                 "max_tokens": max_tokens,
                 "guided_decoding_regex": args.vllm_guided_decoding_regex,
                 "stop": stop,
+                # "include_stop_str_in_output": True, # Will not affect whether it is in the text output; only ids
             },
             timeout=600,
         )
@@ -82,7 +83,7 @@ def _make_tool_inference_requests_batch(
 
         j = resp.json()
         return j["completion_ids"], j["completion_text"]  # type: ignore[return-value]
-    
+
     elif args.vllm_mode == "colocate":
         assert llm is not None, "Require llm for tool inference"
         sampling_params = SamplingParams(
@@ -101,7 +102,7 @@ def _make_tool_inference_requests_batch(
             [out.outputs[0].token_ids for out in outputs],
             [out.outputs[0].text for out in outputs],
         )
-        
+
     else:
         raise ValueError(f"Unsupported vllm_mode: {args.vllm_mode}")
 
@@ -137,7 +138,6 @@ def generate_with_tool_batch(
     contexts: List[str] = prompts[:]  # running transcripts
     prompts_len = [len(prompt) for prompt in prompts]
     completions_to_return: List[str] = [] # adding intermediate savings
-    # contexts_to_return: List[str] = []
     prompts_to_return: List[str] = []
     tokens_left = [args.max_completion_length] * N
     done = [False] * N
@@ -160,10 +160,6 @@ def generate_with_tool_batch(
         active_idx = [i for i, d in enumerate(done) if not d]
         active_prompts = [contexts[i] for i in active_idx]
 
-        # if min([tokens_left[i] for i in active_idx]) <= 0:
-        #     print("DETECTED: tokens_left <= 0")
-        #     import pdb; pdb.set_trace()
-
         comp_ids_list, comp_text_list = _make_tool_inference_requests_batch(
             active_prompts,
             max_tokens=min(tokens_left[i] for i in active_idx),
@@ -179,10 +175,25 @@ def generate_with_tool_batch(
             # ------------------------------------------------------------------
             comp_ids = comp_ids_list[local_i]
             comp_text = comp_text_list[local_i]
-            contexts[global_i] += comp_text
-            stats[global_i]["generated_tokens"] += len(comp_ids)
+
             tokens_left[global_i] -= len(comp_ids)
-            if tokens_left[global_i] <= 0:
+            stats[global_i]["generated_tokens"] += len(comp_ids)
+            last_tok = tokenizer.decode(comp_ids[-1])
+
+            if last_tok == args.eos_token:
+                comp_text += args.eos_token
+                contexts[global_i] += comp_text
+                done[global_i] = True
+                continue
+            elif last_tok == args.result_tokens[0]:
+                # comp_text += args.result_tokens[0] # will be added later
+                contexts[global_i] += comp_text
+            else:
+                assert tokens_left[global_i] <= 0, (
+                    f"Expected last token to be {args.eos_token}/{args.result_tokens[0]}/hit max len, "
+                    f"but got {last_tok} for completion length {len(comp_ids)}."
+                )
+                contexts[global_i] += comp_text
                 done[global_i] = True
                 continue
 
@@ -190,25 +201,28 @@ def generate_with_tool_batch(
             # 2. Look for tool calls
             # ------------------------------------------------------------------
             prompt_idx = len(contexts[global_i]) - len(comp_text)
-            detect = _detect_tool_use(
-                contexts[global_i],
-                prompt_idx=prompt_idx,
+            assert prompt_ids == prompts_len[global_i], (
+                f"Expected prompt_idx {prompts_len[global_i]} for global_i {global_i}, "
+                f"but got {prompt_idx} for context: {contexts[global_i]}"
             )
+            detect = _detect_tool_use(contexts[global_i], prompt_idx=prompts_len[global_i])
 
             if not detect["tool_use"]:
                 done[global_i] = True
                 continue
             elif detect["error_tool_use"]:
                 print(f"[{global_i}] malformed tool call – skipping tool use.")
-                # done[global_i] = True
-                contexts[global_i] += f"\n{args.result_tokens[1]}\n"
+                add = f"\n{args.result_tokens[1]}\n"
                 if tokenizer is not None:
-                    toks = tokenizer("\n" + args.result_tokens[1] + "\n").input_ids
+                    toks = tokenizer(add).input_ids
                     n_toks = len(toks)
                     tokens_left[global_i] -= n_toks
+                    stats[global_i]["generated_tokens"] += n_toks
                     if tokens_left[global_i] <= 0:
                         done[global_i] = True
-                stats[global_i]["generated_tokens"] += len(toks)
+                        stats[global_i]["generated_tokens"] -= n_toks
+                        add = ""
+                contexts[global_i] += add
                 continue
 
             # ------------------------------------------------------------------
@@ -234,8 +248,6 @@ def generate_with_tool_batch(
             # 4. Execute tool & insert result
             # ------------------------------------------------------------------
             tool_type = detect["tool_type"]
-            # contexts[global_i] += f"\n{args.result_tokens[0]}\n"
-
             tool_start = time.time()
 
             if tool_type == "python":
@@ -265,15 +277,15 @@ def generate_with_tool_batch(
                     f"{args.result_tokens[0]}\n" + exec_out + f"\n{args.result_tokens[1]}\n"
                 )
                 if tokenizer is not None:
-                    toks = tokenizer(new_text).input_ids
-                    n_toks = len(toks) - prompts_len[global_i]
-                    tokens_left[global_i] = args.max_completion_length - n_toks
+                    toks = tokenizer(new_text[prompt_idx:]).input_ids
+                    n_toks = len(toks)
+                    tokens_left[global_i] -= n_toks
+                    stats[global_i]["generated_tokens"] += n_toks
                     if tokens_left[global_i] <= 0:
                         done[global_i] = True
-                        contexts[global_i] += tokenizer.decode(toks[:prompts_len[global_i] + args.max_completion_length])
-                        tokens_left[global_i] = 0
+                        contexts[global_i] = tokenizer.decode(toks[:args.max_completion_length])
+                        stats[global_i]["generated_tokens"] = args.max_completion_length
                         continue
-                    stats[global_i]["generated_tokens"] += n_toks
 
                 contexts[global_i] = new_text
 
@@ -293,14 +305,12 @@ def generate_with_tool_batch(
                     toks = tokenizer(new_text).input_ids
                     n_toks = len(toks)
                     tokens_left[global_i] -= n_toks
+                    stats[global_i]["generated_tokens"] += n_toks
                     if tokens_left[global_i] <= 0:
                         done[global_i] = True
-                        take = tokens_left[global_i] * -1
-                        contexts[global_i] += tokenizer.decode(toks[:take])
-                        tokens_left[global_i] = 0
+                        contexts[global_i] += tokenizer.decode(toks[:tokens_left[global_i]])
+                        stats[global_i]["generated_tokens"] = args.max_completion_length
                         continue
-                    stats[global_i]["generated_tokens"] += n_toks
-
                 contexts[global_i] += new_text
 
             elif tool_type == "saving":
@@ -312,9 +322,7 @@ def generate_with_tool_batch(
                     summary = ""
 
                 # bookkeep the old thinking & summary
-                # contexts_to_return.append(contexts[global_i] + f"\n{args.eos_token}\n")
-                # TODO: is appending eos needed?
-                completions_to_return.append(contexts[global_i][prompts_len[global_i]:] + args.eos_token)
+                completions_to_return.append(contexts[global_i][prompts_len[global_i]:])
                 prompts_to_return.append(contexts[global_i][:prompts_len[global_i]])
 
                 # Replace all old thinking with the summary
@@ -344,7 +352,6 @@ def generate_with_tool_batch(
     # for i in range(len(contexts)):
     #     contexts[i] += final_answer[i] + f"\n{args.eos_token}"
 
-    # contexts_to_return.extend(contexts)
     prompts_to_return.extend(prompts)
     for i, context in enumerate(contexts):
         completions_to_return.append(context[prompts_len[i]:])

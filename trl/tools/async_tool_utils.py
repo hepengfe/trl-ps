@@ -64,11 +64,11 @@ def _detect_tool_use(context: str, prompt_idx: int) -> dict:
         "tool_start_idx": None,
     }
 
-    generated = context[prompt_idx:]
-
     start_tag = "<tool_call>"
     end_tag = "</tool_call>"
     response_tag = "</tool_response>"
+
+    generated = context[prompt_idx:]
     
     # Find the last occurrence of tool calling
     start = generated.rfind(start_tag)
@@ -86,7 +86,6 @@ def _detect_tool_use(context: str, prompt_idx: int) -> dict:
     
     # If </tool_call> is not at the end of the generation because of vllm stop
     # then end = -1
-    
     if end == -1:
         tool_call_raw = generated[start + len(start_tag):].strip()
     else:

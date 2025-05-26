@@ -1137,14 +1137,11 @@ class GRPOTrainer(Trainer):
                         # tool inference using vllm
                         if self.accelerator.is_main_process:
                             with profiling_context(self, "vLLM.generate"):
-                                prompts, completions, tool_stats = self._generate_with_tool(all_prompts_text, 20)                                
-                            
-                            # completion_ids_ks = self.processing_class(text=list(completions.keys()))["input_ids"]
-                            # completion_ids_vs = self.processing_class(text=[v for x in completions.values() for v in x])["input_ids"]
+                                prompts, completions, tool_stats = self._generate_with_tool(all_prompts_text, 20)
+
                             completion_ids = self.processing_class(text=completions)["input_ids"]
                             prompt_ids, prompt_mask = self.processing_class(text=prompts).values()
                             n_prompts = [len(prompts)]
-                            # vs = [len(v) for v in completions.values()]
                 else:
                     completion_ids = [None] * len(all_prompts_text)
 

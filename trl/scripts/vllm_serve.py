@@ -420,6 +420,7 @@ def main(script_args: ScriptArguments):
         max_tokens: int = 16
         guided_decoding_regex: Optional[str] = None
         stop: Optional[Union[str, List[str]]] = None
+        include_stop_str_in_output: bool = False
 
     class GenerateResponse(BaseModel):
         completion_ids: list[list[int]]
@@ -466,6 +467,7 @@ def main(script_args: ScriptArguments):
             max_tokens=request.max_tokens,
             guided_decoding=guided_decoding,
             stop=request.stop,
+            include_stop_str_in_output=request.include_stop_str_in_output,
         )
 
         # Evenly distribute prompts across DP ranks
