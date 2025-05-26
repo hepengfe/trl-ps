@@ -11,15 +11,14 @@ class APIKeyRotator:
 
 # OpenAI and Google key pools
 OPENAI_KEYS = [
-    os.getenv("OPENAI_KEY_1", "YOUR_API_KEY_1"),
-    os.getenv("OPENAI_KEY_2", "YOUR_API_KEY_2"),
+    os.getenv("OPENAI_KEY_1", ""),
+    os.getenv("OPENAI_KEY_2", ""),
     # Add more keys as needed
 ]
 
 GOOGLE_KEYS = [
-    os.getenv("GOOGLE_KEY_1", "YOUR_GOOGLE_API_KEY_1"),
-    os.getenv("GOOGLE_KEY_2", "YOUR_GOOGLE_API_KEY_2"),
-    # Add more keys as needed
+    # os.getenv("GOOGLE_KEY_1", ""),
+    os.getenv("GOOGLE_KEY_2", ""),
 ]
 
 openai_key_rotator = APIKeyRotator(OPENAI_KEYS)
