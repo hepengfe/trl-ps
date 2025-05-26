@@ -14,7 +14,7 @@ import threading
 import types
 import builtins
 
-from .key_rotator import google_key_rotator, get_openai_client
+from trl.tools.key_rotator import google_key_rotator, get_openai_client
 
 # base_model = 'gpt-4o-2024-08-06'
 # base_model = 'o3-mini-2025-01-31'
@@ -242,7 +242,9 @@ if __name__ == "__main__":
     # context = ''
     # query  = "What is love? "
     query = "What does non-commutative mean in the context of ring theory?"
-    response = google_retriever(query)
+    for i in range(3):
+        response = google_retriever(query)
+        print(i)
     print(response)
     # # # with open('./retriever_response.txt', 'w') as file:
     # # #    file.write(str(response))
@@ -275,5 +277,7 @@ result = trap(height)
 print(f"Total water trapped: {result}")
 """
     query = "2022/1347"
-    response = python_interpreter(query)
+    for i in range(3):
+        response = python_interpreter(query)
+        print(i)
     print(response)
