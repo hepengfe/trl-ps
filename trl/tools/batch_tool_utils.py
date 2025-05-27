@@ -183,13 +183,13 @@ def generate_with_tool_batch(
             if last_tok == args.eos_token:
                 comp_text += args.eos_token
                 contexts[global_i] += comp_text
-                done[global_i] = True
-                ### TODO: This is a bug in case of saving tool call
-                continue
+                # Still need to let it detect tool use as in case of saving tool it could end with eos
             elif last_tok == args.result_tokens[0]:
                 # comp_text += args.result_tokens[0] # will be added later
                 contexts[global_i] += comp_text
             else:
+                if tokens_left[global_i] > 0:
+                    import pdb; pdb.set_trace()
                 assert tokens_left[global_i] <= 0, (
                     f"Expected last token to be {args.eos_token}/{args.result_tokens[0]}/hit max len, "
                     f"but got {last_tok} for completion length {len(comp_ids)}."
