@@ -162,7 +162,7 @@ def generate_with_tool_batch(
 
         comp_ids_list, comp_text_list = _make_tool_inference_requests_batch(
             active_prompts,
-            max_tokens=min(tokens_left[i] for i in active_idx),
+            max_tokens=max(tokens_left[i] for i in active_idx),
             args=args,
             stop=[args.result_tokens[0], args.eos_token],
             llm=llm,
@@ -177,6 +177,15 @@ def generate_with_tool_batch(
             comp_text = comp_text_list[local_i]
 
             tokens_left[global_i] -= len(comp_ids)
+            if tokens_left[global_i] < 0: # Due to the max(tokens_left) in the request, may happen
+                comp_ids = comp_ids[:tokens_left[global_i]]
+                comp_text = tokenizer.decode(comp_ids)
+                tokens_left[global_i] = 0
+                stats[global_i]["generated_tokens"] += len(comp_ids)
+                contexts[global_i] += comp_text
+                done[global_i] = True
+                continue
+
             stats[global_i]["generated_tokens"] += len(comp_ids)
             last_tok = tokenizer.decode(comp_ids[-1])
 
