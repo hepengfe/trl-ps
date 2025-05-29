@@ -155,7 +155,9 @@ def generate_with_tool_batch(
         step += 1
         if step >= 20:
             break
-        active_idx = [i for i, d in enumerate(done) if not d]
+        active_idx = [i for i, d in enumerate(done) if not d and tokens_left[i] > 0]
+        if len(active_idx) == 0:
+            break
         active_prompts = [contexts[i] for i in active_idx]
 
         comp_ids_list, comp_text_list = _make_tool_inference_requests_batch(
@@ -296,7 +298,10 @@ def generate_with_tool_batch(
                 # reset tokens_left
                 toks = len(tokenizer(f"\n{args.saving_tokens[0]}\n" + summary + f"\n{args.saving_tokens[1]}\n").input_ids)
                 tokens_left[global_i] = args.max_completion_length - toks
-                
+            
+            if tokens_left[global_i] <= 0:
+                done[global_i] = True
+            
             tool_duration = time.time() - tool_start
             print(f"[Time] {tool_type} tool call took {tool_duration:.2f} seconds")
             

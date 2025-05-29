@@ -3,16 +3,18 @@ from llama_index.readers.web import SimpleWebPageReader
 import httpx
 import os
 from llama_index.llms.openai import OpenAI
-import openai
-import contextlib
 import io
 import traceback
-import time
 import tiktoken
 from tqdm import tqdm
 import threading
 import types
 import builtins
+import multiprocessing
+import sys
+import builtins
+import types
+import time
 
 from trl.tools.key_rotator import google_key_rotator, get_openai_client
 
@@ -106,6 +108,81 @@ def google_retriever(query, retrieve_websites = 2):
         except:
             continue
 
+def _isolated_worker(code: str, return_dict):
+    """Runs untrusted code in an isolated process, capturing stdout/stderr."""
+    try:
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        # Override builtins.print
+        custom_builtins = builtins.__dict__.copy()
+        def custom_print(*args, **kwargs):
+            print(*args, file=stdout, **kwargs)
+        custom_builtins['print'] = custom_print
+
+        # Fake sys module
+        fake_sys = types.SimpleNamespace(stderr=stderr)
+
+        exec_globals = {
+            '__builtins__': custom_builtins,
+            'sys': fake_sys,
+        }
+
+        exec(code, exec_globals)
+
+        return_dict["stdout"] = stdout.getvalue()
+        return_dict["stderr"] = stderr.getvalue()
+        return_dict["status"] = "success"
+
+    except Exception:
+        return_dict["stdout"] = ""
+        return_dict["stderr"] = traceback.format_exc()
+        return_dict["status"] = "exception"
+
+
+def safe_execute_and_capture(code: str, client, max_attempts: int = 3, timeout: float = 30.0):
+    code = remove_python_prefix(code)
+
+    for attempt in range(max_attempts):
+        manager = multiprocessing.Manager()
+        return_dict = manager.dict()
+
+        proc = multiprocessing.Process(target=_isolated_worker, args=(code, return_dict))
+        proc.start()
+        proc.join(timeout=timeout)
+
+        if proc.is_alive():
+            proc.kill()
+            return_dict["stdout"] = ""
+            return_dict["stderr"] = f"Execution timed out: code exceeded {timeout} seconds.\n"
+            return_dict["status"] = "timeout"
+
+        stdout = return_dict.get("stdout", "")
+        stderr = return_dict.get("stderr", "")
+        status = return_dict.get("status", "unknown")
+
+        if stdout.strip():
+            return code, stdout, stderr
+
+        # Retry with model-generated debug code
+        error_output = stderr or "No output was produced."
+        debug_prompt = (
+            f"The following Python code ran without producing stdout:\n{code}\n"
+            f"Error or empty stdout:\n{error_output}\n"
+            "Please debug it and add print statements as needed. "
+            "Only return the modified Python code."
+        )
+
+        response = client.chat.completions.create(
+            messages=[{"role": "user", "content": debug_prompt}],
+            model=base_model,
+        )
+        code = remove_python_prefix(response.choices[0].message.content.strip())
+        print("Retrying with modified code:\n", code)
+
+    raise Exception(f"Python Debug Fail after {max_attempts} attempts.")
+
+
 def execute_and_capture(code: str, client, max_attempts: int = 3) -> tuple:
     """
     Execute the given Python code and capture its stdout and stderr
@@ -172,57 +249,6 @@ def execute_and_capture(code: str, client, max_attempts: int = 3) -> tuple:
         print("Retrying with modified code:\n", code)
 
     raise Exception(f"Python Debug Fail after {max_attempts} attempts.")
-
-def execute_and_capture_old(code: str, client, max_attempts: int = 3) -> tuple:
-    """
-    Execute the given Python code and capture its output and errors.
-    If an error occurs, attempt to debug it using the AI model, retrying up to max_attempts times.
-    """
-    code = remove_python_prefix(code)
-    
-    for attempt in range(max_attempts):
-        stdout_capture, stderr_capture = io.StringIO(), io.StringIO()
-        def run_code():
-            with contextlib.redirect_stdout(stdout_capture), contextlib.redirect_stderr(stderr_capture):
-                exec(code, {})
-
-        try:
-            thread = threading.Thread(target=run_code)
-            thread.start()
-            thread.join(timeout=30)  # Wait up to 30 seconds for the code to finish
-            if thread.is_alive():
-                raise TimeoutError("Code execution exceeded 30 seconds")
-            if stdout_capture.getvalue().strip():  # If there's meaningful output, return it
-                return code, stdout_capture.getvalue(), stderr_capture.getvalue()
-            # If no output, ask AI to modify the code to include print statements
-            debug_prompt = (
-                f"The following Python code ran without errors but produced no output:\n{code}\n"
-                "Please modify it to include meaningful print statements so that it generates useful output of the final result of this code. "
-                "Only return the modified Python code."
-            )
-        except Exception as exc:
-            if isinstance(exc, TimeoutError):
-                error_output = "Execution timed out: Your Python code took too long to complete. \
-                    Please review the algorithm for inefficiencies or potential bugs and consider implementing a more efficient solution."
-            else:
-                traceback.print_exc(file=stderr_capture)
-                error_output = stderr_capture.getvalue()
-            debug_prompt = (
-                f"Below is a Python code snippet:\n{code}\n"
-                f"The error message is:\n{error_output}\n"
-                "Please debug this code and ensure it runs correctly. If it does not produce any output, modify it to include print statements so that the final result is clearly displayed. Make sure not to add any code that could terminate the process, such as using 'sys.exit(1)' or similar functions. Only return the modified Python code."
-            )
-
-            
-        response = client.chat.completions.create(
-            messages=[{"role": "user", "content": debug_prompt}],
-            model=base_model,
-        )
-        
-        code = response.choices[0].message.content.strip()
-        code = remove_python_prefix(code)
-        print(code)
-    raise Exception(f"Python Debug Fail. More than {max_attempts} trails.")
 
 def python_interpreter(code: str) -> str:
     """
