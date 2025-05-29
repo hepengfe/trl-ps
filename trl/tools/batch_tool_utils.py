@@ -58,7 +58,7 @@ def _make_tool_inference_requests_batch(
     matching order.
     """
     if args.vllm_mode == "server":
-        url = f"http://{args.vllm_server_host}:{args.vllm_server_port}/generate/"        
+        url = f"http://{args.vllm_server_host}:{args.vllm_server_port}/generate/"
         resp = requests.post(
             url,
             json={
