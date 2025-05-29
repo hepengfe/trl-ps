@@ -21,12 +21,10 @@ from __future__ import annotations
 
 import json
 import time
-from typing import Dict, List, Optional, Tuple, Union
-
 import requests
-import trl
-import os
-import traceback
+
+from typing import Dict, List, Optional, Tuple, Union
+from transformers import PreTrainedTokenizerBase
 
 from .python_and_retriever import (
     google_retriever,
@@ -116,7 +114,7 @@ def generate_with_tool_batch(
     prompts: List[str],
     args: GRPOConfig,
     llm: LLM = None,
-    tokenizer = None,
+    tokenizer: PreTrainedTokenizerBase = None,
 ) -> Tuple[List[str], List[str], List[Dict[str, int]]]:
     """
     Parameters
@@ -217,7 +215,7 @@ def generate_with_tool_batch(
                 continue
             elif detect["error_tool_use"]:
                 print(f"[{global_i}] malformed tool call – skipping tool use.")
-                add = f"\n{args.result_tokens[1]}\n"
+                add = f"\n{args.result_tokens[0]}\n{args.result_tokens[1]}\n"
                 if tokenizer is not None:
                     toks = tokenizer(add).input_ids
                     n_toks = len(toks)
@@ -234,20 +232,22 @@ def generate_with_tool_batch(
             # 3. Termination: no tool call OR ran out of budget
             # ------------------------------------------------------------------
             # if not detect["tool_use"]:
-            #     done[global_i] = True
-            #     continue
-                # # Case 1: token exceeded limit for current prompt
-                # # Case 2: current prompt finished naturally
-                # if tokens_left[global_i] <= 0:
-                #     contexts[global_i] += "\n</think>\n**Final Answer**\n"
-                #     done[global_i] = True
-                #     continue
-                # elif "Final Answer" in contexts[global_i]:
-                #     done[global_i] = True
-                #     continue
-                # # Case 3: One prompt in batch stopped because of length limit, or some unknown issue
-                # else:
-                #     continue
+            #     # done[global_i] = True
+            #     # continue
+                
+            #     # Case 1: token exceeded limit for current prompt
+            #     # Case 2: current prompt finished naturally
+            #     if tokens_left[global_i] <= 0:
+            #         # contexts[global_i] += "\n</think>\n**Final Answer**\n"
+            #         done[global_i] = True
+            #         continue
+            #     elif "Final Answer" in contexts[global_i]:
+            #         done[global_i] = True
+            #         continue
+            #     # Case 3: One prompt in batch stopped because of length limit, or some unknown issue
+            #     # needed cuz of the min(tokens_left) in the request
+            #     else:
+            #         continue
 
             # ------------------------------------------------------------------
             # 4. Execute tool & insert result
@@ -284,8 +284,8 @@ def generate_with_tool_batch(
                 if tokenizer is not None:
                     toks = tokenizer(new_text[prompt_idx:]).input_ids
                     n_toks = len(toks)
-                    tokens_left[global_i] -= n_toks
-                    stats[global_i]["generated_tokens"] += n_toks
+                    tokens_left[global_i] = args.max_completion_length - n_toks
+                    stats[global_i]["generated_tokens"] = n_toks
                     if tokens_left[global_i] <= 0:
                         done[global_i] = True
                         contexts[global_i] = tokenizer.decode(toks[:args.max_completion_length])
@@ -331,18 +331,20 @@ def generate_with_tool_batch(
                 prompts_to_return.append(contexts[global_i][:prompts_len[global_i]])
 
                 # Replace all old thinking with the summary
+                summary = f"{args.saving_tokens[0]}\n" + summary + f"\n{args.saving_tokens[1]}\n"
                 contexts[global_i] = (
                     contexts[global_i][: prompts_len[global_i]] # has \n at the end
-                    + f"{args.saving_tokens[0]}\n"
                     + summary
-                    + f"\n{args.saving_tokens[1]}\n"
-                ) # TODO: Maybe restrict to args. max prompt len
+                )
                 if prompts[global_i].endswith("<think>\n"):
                     contexts[global_i] += "<think>\n"
-                tokens_left[global_i] = args.max_completion_length
                 prompts[global_i] = contexts[global_i]
                 prompts_len[global_i] = len(contexts[global_i])
 
+                # reset tokens_left
+                toks = len(tokenizer(summary).input_ids)
+                tokens_left[global_i] = args.max_completion_length - toks
+                
             tool_duration = time.time() - tool_start
             print(f"[Time] {tool_type} tool call took {tool_duration:.2f} seconds")
 
