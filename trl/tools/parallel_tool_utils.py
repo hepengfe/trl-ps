@@ -116,7 +116,11 @@ def _execute_tool_job(args):
     try:
         tool_type = detect["tool_type"]
         if tool_type == "python":
-            code = remove_python_prefix(text=detect["tool_argument"]["code"])
+            if isinstance(detect["tool_argument"], str):
+                code = detect["tool_argument"]
+            else:
+                code = detect["tool_argument"]["code"]
+                
             try:
                 new_code, exec_out = python_interpreter(code)
             except Exception as e:
@@ -191,7 +195,9 @@ def generate_with_tool_batch(
     step = 0
     while not all(done) and step < 20:
         step += 1
-        active_idx = [i for i, d in enumerate(done) if not d]
+        active_idx = [i for i, d in enumerate(done) if not d and tokens_left[i] > 0]
+        if len(active_idx) == 0:
+            break
         active_prompts = [contexts[i] for i in active_idx]
 
         comp_ids_list, comp_text_list = _make_tool_inference_requests_batch(
@@ -204,7 +210,6 @@ def generate_with_tool_batch(
 
         # Update contexts and detect tool use
         tool_jobs = []
-        detect_results = []
         for local_i, global_i in enumerate(active_idx):
             comp_ids = comp_ids_list[local_i]
             comp_text = comp_text_list[local_i]
@@ -216,10 +221,17 @@ def generate_with_tool_batch(
                 contexts[global_i],
                 prompt_idx=len(contexts[global_i]) - len(comp_text),
             )
-            if detect["error_tool_use"] or not detect["tool_use"]:
-                contexts[global_i] += f"\n{args.result_tokens[1]}\n"
-                done[global_i] = not detect["tool_use"]
+            if detect["error_tool_use"]:
+                print(f"[{global_i}] malformed tool call – skipping tool use.")
+                contexts[global_i] += f"\n{args.result_tokens[0]}\n{args.result_tokens[1]}\n"
                 continue
+            
+            if not detect["tool_use"]:
+                if tokens_left[global_i] <= 0 or "Final Answer" in contexts[global_i]:
+                    done[global_i] = True
+                    continue
+                else:
+                    continue
 
             tool_type = detect["tool_type"]
             if tool_type == "saving":
@@ -237,27 +249,37 @@ def generate_with_tool_batch(
                     contexts[global_i][:prompts_len[global_i]]
                     + f"\n{args.saving_tokens[0]}\n{summary}\n{args.saving_tokens[1]}\n"
                 )
-                tokens_left[global_i] = args.max_completion_length
-                prompts_len[global_i] = len(contexts[global_i])
+                toks = len(tokenizer(f"\n{args.saving_tokens[0]}\n" + summary + f"\n{args.saving_tokens[1]}\n").input_ids)
+                tokens_left[global_i] = args.max_completion_length - toks
+
             else:
                 tool_jobs.append((global_i, detect, contexts[global_i], args, tokenizer))
 
+        tool_start = time.time()
         if tool_jobs:
             with mp.Pool(min(len(tool_jobs), mp.cpu_count())) as pool:
                 results = pool.map(_execute_tool_job, tool_jobs)
 
-            for idx, insertion, tool_type in results:
+            for global_i, insertion, tool_type in results:
                 if not insertion:
-                    done[idx] = True
+                    done[global_i] = True
                     continue
-                contexts[idx] += insertion
+                contexts[global_i] += insertion
                 toks = len(tokenizer(insertion).input_ids)
-                stats[idx]["generated_tokens"] += toks
-                tokens_left[idx] -= toks
+                
+                # stats[global_i]["generated_tokens"] -= len(comp_ids)
+                # tokens_left[global_i] += len(comp_ids)
+                # stats[global_i]["generated_tokens"] += toks
+                # tokens_left[global_i] -= toks
+                
                 if tool_type == "python":
-                    stats[idx]["num_python"] += 1
+                    stats[global_i]["num_python"] += 1
                 elif tool_type in ("retrieval", "retrieve"):
-                    stats[idx]["num_retrieval"] += 1
+                    stats[global_i]["num_retrieval"] += 1
+        
+        tool_duration = time.time() - tool_start
+        print(f"[Time] Parallel tool call took {tool_duration:.2f} seconds. Avg {tool_duration / len(tool_jobs):.2f} seconds.")
+
 
     contexts_to_return.extend(contexts)
     prompts_to_return.extend(prompts)

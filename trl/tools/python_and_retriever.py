@@ -257,7 +257,7 @@ def python_interpreter(code: str) -> str:
     the code's intended behavior.
     """
     client = get_openai_client()
-    code, output, error_output = execute_and_capture(code, client, 5)
+    code, output, error_output = safe_execute_and_capture(code, client, 5)
     if output:
         return code, output
     else:
