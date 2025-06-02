@@ -29,6 +29,8 @@ import os
 import traceback
 import multiprocessing as mp
 
+from concurrent.futures import ThreadPoolExecutor
+
 from .python_and_retriever import (
     google_retriever,
     python_interpreter,
@@ -116,6 +118,7 @@ def _execute_tool_job(args):
     try:
         tool_type = detect["tool_type"]
         if tool_type == "python":
+            print("Calling Python Interpreter")
             if isinstance(detect["tool_argument"], str):
                 code = detect["tool_argument"]
             else:
@@ -136,9 +139,11 @@ def _execute_tool_job(args):
                 f"{args_.tool_tokens[0]}\n{new_python_code}\n{args_.tool_tokens[1]}\n"
                 f"{args_.result_tokens[0]}\n{exec_out}\n{args_.result_tokens[1]}\n"
             )
+            print(f"Python Interpreter Finished. {exec_out}")
             return idx, insert, tool_type
 
         elif tool_type in ("retrieval", "retrieve"):
+            print("Calling Web Retriever")
             try:
                 result = google_retriever(**detect["tool_argument"])
                 result_text = result.response if result else ""
@@ -149,6 +154,7 @@ def _execute_tool_job(args):
             insert = (
                 f"{args_.result_tokens[0]}\n{result_text}\n{args_.result_tokens[1]}\n"
             )
+            print("Web Retriever Finished.")
             return idx, insert, tool_type
 
     except Exception as e:
@@ -257,8 +263,9 @@ def generate_with_tool_batch(
 
         tool_start = time.time()
         if tool_jobs:
-            with mp.Pool(min(len(tool_jobs), mp.cpu_count())) as pool:
-                results = pool.map(_execute_tool_job, tool_jobs)
+            with ThreadPoolExecutor(max_workers=min(len(tool_jobs), os.cpu_count())) as executor:
+                results = list(executor.map(_execute_tool_job, tool_jobs))
+
 
             for global_i, insertion, tool_type in results:
                 if not insertion:
@@ -277,8 +284,8 @@ def generate_with_tool_batch(
                 elif tool_type in ("retrieval", "retrieve"):
                     stats[global_i]["num_retrieval"] += 1
         
-        tool_duration = time.time() - tool_start
-        print(f"[Time] Parallel tool call took {tool_duration:.2f} seconds. Avg {tool_duration / len(tool_jobs):.2f} seconds.")
+            tool_duration = time.time() - tool_start
+            print(f"[Time] {tool_duration:.2f} seconds for {len(tool_jobs)} parallel tool calls. Avg {tool_duration / len(tool_jobs):.2f} seconds.")
 
 
     contexts_to_return.extend(contexts)

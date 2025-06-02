@@ -108,19 +108,17 @@ def google_retriever(query, retrieve_websites = 2):
         except:
             continue
 
-def _isolated_worker(code: str, return_dict):
+def _isolated_worker(code: str, conn):
     """Runs untrusted code in an isolated process, capturing stdout/stderr."""
     try:
         stdout = io.StringIO()
         stderr = io.StringIO()
 
-        # Override builtins.print
         custom_builtins = builtins.__dict__.copy()
         def custom_print(*args, **kwargs):
             print(*args, file=stdout, **kwargs)
         custom_builtins['print'] = custom_print
 
-        # Fake sys module
         fake_sys = types.SimpleNamespace(stderr=stderr)
 
         exec_globals = {
@@ -130,32 +128,44 @@ def _isolated_worker(code: str, return_dict):
 
         exec(code, exec_globals)
 
-        return_dict["stdout"] = stdout.getvalue()
-        return_dict["stderr"] = stderr.getvalue()
-        return_dict["status"] = "success"
-
+        conn.send({
+            "stdout": stdout.getvalue(),
+            "stderr": stderr.getvalue(),
+            "status": "success"
+        })
     except Exception:
-        return_dict["stdout"] = ""
-        return_dict["stderr"] = traceback.format_exc()
-        return_dict["status"] = "exception"
-
+        conn.send({
+            "stdout": "",
+            "stderr": traceback.format_exc(),
+            "status": "exception"
+        })
+    finally:
+        conn.close()
 
 def safe_execute_and_capture(code: str, client, max_attempts: int = 3, timeout: float = 30.0):
     code = remove_python_prefix(code)
 
     for attempt in range(max_attempts):
-        manager = multiprocessing.Manager()
-        return_dict = manager.dict()
-
-        proc = multiprocessing.Process(target=_isolated_worker, args=(code, return_dict))
+        parent_conn, child_conn = multiprocessing.Pipe()
+        proc = multiprocessing.Process(target=_isolated_worker, args=(code, child_conn))
         proc.start()
         proc.join(timeout=timeout)
 
         if proc.is_alive():
             proc.kill()
-            return_dict["stdout"] = ""
-            return_dict["stderr"] = f"Execution timed out: code exceeded {timeout} seconds.\n"
-            return_dict["status"] = "timeout"
+            return_dict = {
+                "stdout": "",
+                "stderr": f"Execution timed out: code exceeded {timeout} seconds.\n",
+                "status": "timeout"
+            }
+        elif parent_conn.poll():
+            return_dict = parent_conn.recv()
+        else:
+            return_dict = {
+                "stdout": "",
+                "stderr": "No response from subprocess.",
+                "status": "error"
+            }
 
         stdout = return_dict.get("stdout", "")
         stderr = return_dict.get("stderr", "")
@@ -164,13 +174,12 @@ def safe_execute_and_capture(code: str, client, max_attempts: int = 3, timeout: 
         if stdout.strip():
             return code, stdout, stderr
 
-        # Retry with model-generated debug code
+        # Retry with debug code
         error_output = stderr or "No output was produced."
         debug_prompt = (
             f"The following Python code ran without producing stdout:\n{code}\n"
             f"Error or empty stdout:\n{error_output}\n"
-            "Please debug it and add print statements as needed. "
-            "Only return the modified Python code."
+            "Please debug it and add print statements as needed. Only return the modified Python code."
         )
 
         response = client.chat.completions.create(
@@ -178,7 +187,7 @@ def safe_execute_and_capture(code: str, client, max_attempts: int = 3, timeout: 
             model=base_model,
         )
         code = remove_python_prefix(response.choices[0].message.content.strip())
-        print("Retrying with modified code:\n", code)
+        print("Retrying with modified code")
 
     raise Exception(f"Python Debug Fail after {max_attempts} attempts.")
 
@@ -246,7 +255,7 @@ def execute_and_capture(code: str, client, max_attempts: int = 3) -> tuple:
             model=base_model,
         )
         code = remove_python_prefix(response.choices[0].message.content.strip())
-        print("Retrying with modified code:\n", code)
+        # print("Retrying with modified code:\n", code)
 
     raise Exception(f"Python Debug Fail after {max_attempts} attempts.")
 
