@@ -30,6 +30,7 @@ import traceback
 import multiprocessing as mp
 
 from concurrent.futures import ThreadPoolExecutor
+from copy import deepcopy
 
 from .python_and_retriever import (
     google_retriever,
@@ -114,7 +115,7 @@ def _make_tool_inference_requests_batch(
     
 def _execute_tool_job(args):
     """Worker for executing tool calls (Python or retrieval)."""
-    idx, detect, context, args_, tokenizer = args
+    global_i, detect, context, args_, tokenizer = args
     try:
         tool_type = detect["tool_type"]
         if tool_type == "python":
@@ -127,7 +128,7 @@ def _execute_tool_job(args):
             try:
                 new_code, exec_out = python_interpreter(code)
             except Exception as e:
-                print(f"[ERROR] Python execution failed for idx={idx}:\n{code}\n{e}")
+                print(f"[ERROR] Python execution failed for idx={global_i}:\n{code}\n{e}")
                 exec_out = ""
                 new_code = code
 
@@ -135,12 +136,15 @@ def _execute_tool_job(args):
                 "name": "python",
                 "arguments": {"code": new_code}
             })
-            insert = (
-                f"{args_.tool_tokens[0]}\n{new_python_code}\n{args_.tool_tokens[1]}\n"
-                f"{args_.result_tokens[0]}\n{exec_out}\n{args_.result_tokens[1]}\n"
+            
+            python_start_idx = detect["tool_start_idx"]
+            context = (
+                context[:python_start_idx]
+                + f"{args_.tool_tokens[0]}\n" + new_python_code + f"\n{args_.tool_tokens[1]}\n"
+                f"{args_.result_tokens[0]}\n" + exec_out + f"\n{args_.result_tokens[1]}\n"
             )
-            print(f"Python Interpreter Finished. {exec_out}")
-            return idx, insert, tool_type
+            print(f"Python Interpreter Finished. Result: {exec_out[:30]}")
+            return global_i, tool_type, context
 
         elif tool_type in ("retrieval", "retrieve"):
             print("Calling Web Retriever")
@@ -148,18 +152,19 @@ def _execute_tool_job(args):
                 result = google_retriever(**detect["tool_argument"])
                 result_text = result.response if result else ""
             except Exception as e:
-                print(f"[ERROR] Retrieval failed for idx={idx}: {e}")
+                print(f"[ERROR] Retrieval failed for idx={global_i}: {e}")
                 result_text = ""
 
-            insert = (
-                f"{args_.result_tokens[0]}\n{result_text}\n{args_.result_tokens[1]}\n"
+            context = (
+                context +
+                f"{args_.result_tokens[0]}\n" + result_text + f"\n{args_.result_tokens[1]}\n"
             )
-            print("Web Retriever Finished.")
-            return idx, insert, tool_type
+            print(f"Web Retriever Finished. Result: {result_text[:30]}")
+            return global_i, tool_type, context
 
     except Exception as e:
-        print(f"[ERROR] Tool job failed for idx={idx}: {e}")
-        return idx, "", None
+        print(f"[ERROR] Tool job failed for idx={global_i}: {e}")
+        return global_i, None, context
 
 
 ################################################################################
@@ -259,7 +264,7 @@ def generate_with_tool_batch(
                 tokens_left[global_i] = args.max_completion_length - toks
 
             else:
-                tool_jobs.append((global_i, detect, contexts[global_i], args, tokenizer))
+                tool_jobs.append((global_i, deepcopy(detect), contexts[global_i], args, tokenizer))
 
         tool_start = time.time()
         if tool_jobs:
@@ -267,18 +272,9 @@ def generate_with_tool_batch(
                 results = list(executor.map(_execute_tool_job, tool_jobs))
 
 
-            for global_i, insertion, tool_type in results:
-                if not insertion:
-                    done[global_i] = True
-                    continue
-                contexts[global_i] += insertion
-                toks = len(tokenizer(insertion).input_ids)
-                
-                # stats[global_i]["generated_tokens"] -= len(comp_ids)
-                # tokens_left[global_i] += len(comp_ids)
-                # stats[global_i]["generated_tokens"] += toks
-                # tokens_left[global_i] -= toks
-                
+            for global_i, tool_type, updated_context in results:
+                # TODO: manage token counting
+                contexts[global_i] = updated_context
                 if tool_type == "python":
                     stats[global_i]["num_python"] += 1
                 elif tool_type in ("retrieval", "retrieve"):
