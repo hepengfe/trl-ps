@@ -29,6 +29,9 @@ import os
 import traceback
 import multiprocessing as mp
 
+from concurrent.futures import ThreadPoolExecutor
+from copy import deepcopy
+
 from .python_and_retriever import (
     google_retriever,
     python_interpreter,
@@ -112,15 +115,20 @@ def _make_tool_inference_requests_batch(
     
 def _execute_tool_job(args):
     """Worker for executing tool calls (Python or retrieval)."""
-    idx, detect, context, args_, tokenizer = args
+    global_i, detect, context, args_, tokenizer = args
     try:
         tool_type = detect["tool_type"]
         if tool_type == "python":
-            code = remove_python_prefix(text=detect["tool_argument"]["code"])
+            print("Calling Python Interpreter")
+            if isinstance(detect["tool_argument"], str):
+                code = detect["tool_argument"]
+            else:
+                code = detect["tool_argument"]["code"]
+                
             try:
                 new_code, exec_out = python_interpreter(code)
             except Exception as e:
-                print(f"[ERROR] Python execution failed for idx={idx}:\n{code}\n{e}")
+                print(f"[ERROR] Python execution failed for idx={global_i}:\n{code}\n{e}")
                 exec_out = ""
                 new_code = code
 
@@ -128,28 +136,35 @@ def _execute_tool_job(args):
                 "name": "python",
                 "arguments": {"code": new_code}
             })
-            insert = (
-                f"{args_.tool_tokens[0]}\n{new_python_code}\n{args_.tool_tokens[1]}\n"
-                f"{args_.result_tokens[0]}\n{exec_out}\n{args_.result_tokens[1]}\n"
+            
+            python_start_idx = detect["tool_start_idx"]
+            context = (
+                context[:python_start_idx]
+                + f"{args_.tool_tokens[0]}\n" + new_python_code + f"\n{args_.tool_tokens[1]}\n"
+                f"{args_.result_tokens[0]}\n" + exec_out + f"\n{args_.result_tokens[1]}\n"
             )
-            return idx, insert, tool_type
+            print(f"Python Interpreter Finished. Result: {exec_out[:30]}")
+            return global_i, tool_type, context
 
         elif tool_type in ("retrieval", "retrieve"):
+            print("Calling Web Retriever")
             try:
                 result = google_retriever(**detect["tool_argument"])
                 result_text = result.response if result else ""
             except Exception as e:
-                print(f"[ERROR] Retrieval failed for idx={idx}: {e}")
+                print(f"[ERROR] Retrieval failed for idx={global_i}: {e}")
                 result_text = ""
 
-            insert = (
-                f"{args_.result_tokens[0]}\n{result_text}\n{args_.result_tokens[1]}\n"
+            context = (
+                context +
+                f"{args_.result_tokens[0]}\n" + result_text + f"\n{args_.result_tokens[1]}\n"
             )
-            return idx, insert, tool_type
+            print(f"Web Retriever Finished. Result: {result_text[:30]}")
+            return global_i, tool_type, context
 
     except Exception as e:
-        print(f"[ERROR] Tool job failed for idx={idx}: {e}")
-        return idx, "", None
+        print(f"[ERROR] Tool job failed for idx={global_i}: {e}")
+        return global_i, None, context
 
 
 ################################################################################
@@ -191,7 +206,9 @@ def generate_with_tool_batch(
     step = 0
     while not all(done) and step < 20:
         step += 1
-        active_idx = [i for i, d in enumerate(done) if not d]
+        active_idx = [i for i, d in enumerate(done) if not d and tokens_left[i] > 0]
+        if len(active_idx) == 0:
+            break
         active_prompts = [contexts[i] for i in active_idx]
 
         comp_ids_list, comp_text_list = _make_tool_inference_requests_batch(
@@ -204,7 +221,6 @@ def generate_with_tool_batch(
 
         # Update contexts and detect tool use
         tool_jobs = []
-        detect_results = []
         for local_i, global_i in enumerate(active_idx):
             comp_ids = comp_ids_list[local_i]
             comp_text = comp_text_list[local_i]
@@ -216,10 +232,17 @@ def generate_with_tool_batch(
                 contexts[global_i],
                 prompt_idx=len(contexts[global_i]) - len(comp_text),
             )
-            if detect["error_tool_use"] or not detect["tool_use"]:
-                contexts[global_i] += f"\n{args.result_tokens[1]}\n"
-                done[global_i] = not detect["tool_use"]
+            if detect["error_tool_use"]:
+                print(f"[{global_i}] malformed tool call – skipping tool use.")
+                contexts[global_i] += f"\n{args.result_tokens[0]}\n{args.result_tokens[1]}\n"
                 continue
+            
+            if not detect["tool_use"]:
+                if tokens_left[global_i] <= 0 or "Final Answer" in contexts[global_i]:
+                    done[global_i] = True
+                    continue
+                else:
+                    continue
 
             tool_type = detect["tool_type"]
             if tool_type == "saving":
@@ -237,27 +260,29 @@ def generate_with_tool_batch(
                     contexts[global_i][:prompts_len[global_i]]
                     + f"\n{args.saving_tokens[0]}\n{summary}\n{args.saving_tokens[1]}\n"
                 )
-                tokens_left[global_i] = args.max_completion_length
-                prompts_len[global_i] = len(contexts[global_i])
+                toks = len(tokenizer(f"\n{args.saving_tokens[0]}\n" + summary + f"\n{args.saving_tokens[1]}\n").input_ids)
+                tokens_left[global_i] = args.max_completion_length - toks
+
             else:
-                tool_jobs.append((global_i, detect, contexts[global_i], args, tokenizer))
+                tool_jobs.append((global_i, deepcopy(detect), contexts[global_i], args, tokenizer))
 
+        tool_start = time.time()
         if tool_jobs:
-            with mp.Pool(min(len(tool_jobs), mp.cpu_count())) as pool:
-                results = pool.map(_execute_tool_job, tool_jobs)
+            with ThreadPoolExecutor(max_workers=min(len(tool_jobs), os.cpu_count())) as executor:
+                results = list(executor.map(_execute_tool_job, tool_jobs))
 
-            for idx, insertion, tool_type in results:
-                if not insertion:
-                    done[idx] = True
-                    continue
-                contexts[idx] += insertion
-                toks = len(tokenizer(insertion).input_ids)
-                stats[idx]["generated_tokens"] += toks
-                tokens_left[idx] -= toks
+
+            for global_i, tool_type, updated_context in results:
+                # TODO: manage token counting
+                contexts[global_i] = updated_context
                 if tool_type == "python":
-                    stats[idx]["num_python"] += 1
+                    stats[global_i]["num_python"] += 1
                 elif tool_type in ("retrieval", "retrieve"):
-                    stats[idx]["num_retrieval"] += 1
+                    stats[global_i]["num_retrieval"] += 1
+        
+            tool_duration = time.time() - tool_start
+            print(f"[Time] {tool_duration:.2f} seconds for {len(tool_jobs)} parallel tool calls. Avg {tool_duration / len(tool_jobs):.2f} seconds.")
+
 
     contexts_to_return.extend(contexts)
     prompts_to_return.extend(prompts)

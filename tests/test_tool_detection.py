@@ -64,11 +64,11 @@ config = GRPOConfig(
 random.shuffle(questions)
 
 # Run tool-based inference and collect results
-parallel = False
+is_async = False
 batch = True
 
 
-if parallel:
+if is_async:
     results = generate_with_tool_async(questions, config)
     
     with open(output_path, "w") as f:
@@ -78,7 +78,7 @@ if parallel:
     dataset.push_to_hub("ryzax/qwen3_output_new")
     
 elif batch:
-    assert parallel == False
+    assert is_async == False
     results = []
     prompts = []
     for question in questions:

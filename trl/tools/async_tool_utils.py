@@ -136,7 +136,7 @@ def _detect_tool_use(context: str, prompt_idx: int) -> dict:
             "error_tool_use": True,
             "tool_start_idx": start,
         }
-    print(result)
+    # print(result)
     return result
 
 def _generate_with_tool(

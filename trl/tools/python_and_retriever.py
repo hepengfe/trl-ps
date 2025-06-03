@@ -16,7 +16,7 @@ import builtins
 import types
 import time
 
-from trl.tools.key_rotator import google_key_rotator, get_openai_client
+from trl.tools.key_rotator import openai_key_rotator, google_key_rotator, get_openai_client
 
 # base_model = 'gpt-4o-2024-08-06'
 # base_model = 'o3-mini-2025-01-31'
@@ -31,8 +31,12 @@ base_model = 'gpt-4.1-nano-2025-04-14'
     # ),
 # )
 
-def count_tokens(text, model_name=base_model):
-    encoding = tiktoken.encoding_for_model(model_name)
+def count_tokens(text, model_name=None):
+    # Fall back to cl100k_base if the model is not recognized
+    try:
+        encoding = tiktoken.encoding_for_model(model_name)
+    except:
+        encoding = tiktoken.get_encoding("cl100k_base")
     tokens = encoding.encode(text)
     return len(tokens)
 
@@ -43,22 +47,6 @@ def remove_python_prefix(text):
         return "\n".join(lines[1:-1])
     return text
 
-def polish_query(context,query):
-    '''
-    TODO
-    This function is used to polish the query problem based on the previous context.
-    '''
-    prompt = f"**Context**:{context} **Query**:{query}"
-    
-    completion = client.chat.completions.create(
-        model=base_model, 
-        messages=[
-            {"role": "system", "content": "You are a helpful assistant. You need to polish the query based on the previous context."},
-            {"role": "user", "content": f"{prompt}"}
-        ]
-    )
-    return completion.choices[0].message.content.strip()
-
 
 def google_retriever(query, retrieve_websites = 2):
     '''
@@ -66,12 +54,6 @@ def google_retriever(query, retrieve_websites = 2):
     ''' 
     base_url = 'https://www.googleapis.com/customsearch/v1'
     google_key = google_key_rotator.next()
-    # params = {
-    #         'key': '',
-    #         'cx': '',
-    #         'q': query,
-    #         'num': retrieve_websites # The number of websites you want.
-    # }
     params = {
             'key': google_key,
             'cx': '',
@@ -83,7 +65,7 @@ def google_retriever(query, retrieve_websites = 2):
     response.raise_for_status()
     data = response.json()
     import openai
-    openai.api_key = os.environ.get("OPENAI_API_KEY", "YOUR_API_KEY") 
+    openai.api_key = openai_key_rotator.next()
     # openai.base_url = os.environ.get("OPENAI_BASE_URL", "https://hk.xty.app/v1")
     # openai.http_client = httpx.Client(
     #         base_url="https://hk.xty.app/v1",
@@ -105,83 +87,9 @@ def google_retriever(query, retrieve_websites = 2):
             else:
                 response = query_engine.query(query + ' Use only one paragraph to summarize your answer.')
             return response
-        except:
+        except Exception as e:
+            print(e)
             continue
-
-def _isolated_worker(code: str, return_dict):
-    """Runs untrusted code in an isolated process, capturing stdout/stderr."""
-    try:
-        stdout = io.StringIO()
-        stderr = io.StringIO()
-
-        # Override builtins.print
-        custom_builtins = builtins.__dict__.copy()
-        def custom_print(*args, **kwargs):
-            print(*args, file=stdout, **kwargs)
-        custom_builtins['print'] = custom_print
-
-        # Fake sys module
-        fake_sys = types.SimpleNamespace(stderr=stderr)
-
-        exec_globals = {
-            '__builtins__': custom_builtins,
-            'sys': fake_sys,
-        }
-
-        exec(code, exec_globals)
-
-        return_dict["stdout"] = stdout.getvalue()
-        return_dict["stderr"] = stderr.getvalue()
-        return_dict["status"] = "success"
-
-    except Exception:
-        return_dict["stdout"] = ""
-        return_dict["stderr"] = traceback.format_exc()
-        return_dict["status"] = "exception"
-
-
-def safe_execute_and_capture(code: str, client, max_attempts: int = 3, timeout: float = 30.0):
-    code = remove_python_prefix(code)
-
-    for attempt in range(max_attempts):
-        manager = multiprocessing.Manager()
-        return_dict = manager.dict()
-
-        proc = multiprocessing.Process(target=_isolated_worker, args=(code, return_dict))
-        proc.start()
-        proc.join(timeout=timeout)
-
-        if proc.is_alive():
-            proc.kill()
-            return_dict["stdout"] = ""
-            return_dict["stderr"] = f"Execution timed out: code exceeded {timeout} seconds.\n"
-            return_dict["status"] = "timeout"
-
-        stdout = return_dict.get("stdout", "")
-        stderr = return_dict.get("stderr", "")
-        status = return_dict.get("status", "unknown")
-
-        if stdout.strip():
-            return code, stdout, stderr
-
-        # Retry with model-generated debug code
-        error_output = stderr or "No output was produced."
-        debug_prompt = (
-            f"The following Python code ran without producing stdout:\n{code}\n"
-            f"Error or empty stdout:\n{error_output}\n"
-            "Please debug it and add print statements as needed. "
-            "Only return the modified Python code."
-        )
-
-        response = client.chat.completions.create(
-            messages=[{"role": "user", "content": debug_prompt}],
-            model=base_model,
-        )
-        code = remove_python_prefix(response.choices[0].message.content.strip())
-        print("Retrying with modified code:\n", code)
-
-    raise Exception(f"Python Debug Fail after {max_attempts} attempts.")
-
 
 def execute_and_capture(code: str, client, max_attempts: int = 3) -> tuple:
     """
@@ -200,7 +108,13 @@ def execute_and_capture(code: str, client, max_attempts: int = 3) -> tuple:
             custom_builtins = builtins.__dict__.copy()
             def custom_print(*args, **kwargs):
                 builtins.print(*args, file=stdout_capture, **kwargs)
+            def blocked_func(name):
+                def f(*args, **kwargs):
+                    raise RuntimeError(f"{name}() is disabled in this environment")
+                return f
             custom_builtins['print'] = custom_print
+            custom_builtins['input'] = blocked_func("input")
+            custom_builtins['open'] = blocked_func("open")
 
             # Fake sys for stderr capture
             fake_sys = types.SimpleNamespace(stderr=stderr_capture)
@@ -209,6 +123,7 @@ def execute_and_capture(code: str, client, max_attempts: int = 3) -> tuple:
             globals_dict = {
                 '__builtins__': custom_builtins,
                 'sys': fake_sys,
+                '__name__': '__main__',
             }
 
             try:
@@ -246,7 +161,7 @@ def execute_and_capture(code: str, client, max_attempts: int = 3) -> tuple:
             model=base_model,
         )
         code = remove_python_prefix(response.choices[0].message.content.strip())
-        print("Retrying with modified code:\n", code)
+        print("Retrying with modified code")
 
     raise Exception(f"Python Debug Fail after {max_attempts} attempts.")
 
@@ -265,17 +180,15 @@ def python_interpreter(code: str) -> str:
 
 
 if __name__ == "__main__":
-    # context = ''
-    # query  = "What is love? "
+    
+    # testing retriever
     query = "What does non-commutative mean in the context of ring theory?"
     for i in range(3):
         response = google_retriever(query)
         print(i)
     print(response)
-    # # # with open('./retriever_response.txt', 'w') as file:
-    # # #    file.write(str(response))
-    # # # # The text shows in the terminal might be incomplete. Please refer to retriever_response.txt.
-    # print(response)
+    
+    # testing python interpreter
     query = """
 def trap(height):
     n = len(height)
