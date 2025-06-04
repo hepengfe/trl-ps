@@ -1145,6 +1145,9 @@ class GRPOTrainer(Trainer):
                             prompt_ids, prompt_mask = self.processing_class(text=prompts).values()
                             n_prompts = [len(prompts)]
                             # vs = [len(v) for v in completions.values()]
+                            self._metrics[mode]["tools/num_python"].append(tool_stats["num_python"])
+                            self._metrics[mode]["tools/num_retrieval"].append(tool_stats["num_retrieval"])
+                            self._metrics[mode]["tools/num_saving"].append(tool_stats["num_saving"])
                 else:
                     completion_ids = [None] * len(all_prompts_text)
 
