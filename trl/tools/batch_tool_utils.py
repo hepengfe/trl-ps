@@ -181,15 +181,14 @@ def generate_with_tool_batch(
 
             if last_tok == args.eos_token:
                 comp_text += args.eos_token
-                contexts[global_i] += comp_text
                 # Still need to let it detect tool use as in case of saving tool it could end with eos
-            else:
-                contexts[global_i] += comp_text
+
+            prompt_idx = len(contexts[global_i])
+            contexts[global_i] += comp_text
             # ------------------------------------------------------------------
             # 2. Look for tool calls
             # ------------------------------------------------------------------
-            prompt_idx = len(contexts[global_i]) - len(comp_text) # != prompts_len[global_i]; as may include prior tool calls
-            detect = _detect_tool_use(contexts[global_i], prompt_idx=prompts_len[global_i])
+            detect = _detect_tool_use(contexts[global_i], prompt_idx=prompt_idx)
 
             # ------------------------------------------------------------------
             # 3. Termination: error tool call OR no tool call OR ran out of budget
