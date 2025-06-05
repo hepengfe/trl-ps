@@ -63,11 +63,12 @@ def _detect_tool_use(context: str, prompt_idx: int) -> dict:
         "error_tool_use": False,
         "tool_start_idx": None,
     }
-
     start_tag = "<tool_call>"
     end_tag = "</tool_call>"
     response_tag = "</tool_response>"
 
+    generated = context[prompt_idx:]
+    
     generated = context[prompt_idx:]
     
     # Find the last occurrence of tool calling
