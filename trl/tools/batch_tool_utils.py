@@ -203,15 +203,13 @@ def generate_with_tool_batch(
             elif detect["error_tool_use"]:
                 print(f"[{global_i}] malformed tool call – skipping tool use.")
                 add = f"\n{args.result_tokens[0]}\n{args.result_tokens[1]}\n"
-                if tokenizer is not None:
-                    toks = tokenizer(add).input_ids
-                    n_toks = len(toks)
-                    tokens_left[global_i] -= n_toks
-                    stats[global_i]["generated_tokens"] += n_toks
-                    if tokens_left[global_i] <= 0:
-                        done[global_i] = True
-                        stats[global_i]["generated_tokens"] -= n_toks
-                        add = ""
+                n_toks = len(tokenizer(add).input_ids)
+                tokens_left[global_i] -= n_toks
+                stats[global_i]["generated_tokens"] += n_toks
+                if tokens_left[global_i] <= 0:
+                    done[global_i] = True
+                    stats[global_i]["generated_tokens"] -= n_toks
+                    add = ""
                 contexts[global_i] += add
                 continue
 
@@ -247,16 +245,16 @@ def generate_with_tool_batch(
                     + f"{args.tool_tokens[0]}\n" + new_python_code + f"\n{args.tool_tokens[1]}\n"
                     f"{args.result_tokens[0]}\n" + exec_out + f"\n{args.result_tokens[1]}\n"
                 )
-                if tokenizer is not None:
-                    toks = tokenizer(new_text[prompt_idx:]).input_ids
-                    n_toks = len(toks)
-                    tokens_left[global_i] = args.max_completion_length - n_toks
-                    stats[global_i]["generated_tokens"] = n_toks
-                    if tokens_left[global_i] <= 0:
-                        done[global_i] = True
-                        contexts[global_i] = tokenizer.decode(toks[:args.max_completion_length])
-                        stats[global_i]["generated_tokens"] = args.max_completion_length
-                        continue
+                toks = tokenizer(new_text[prompt_idx:]).input_ids
+                n_toks = len(toks)
+                tokens_left[global_i] = args.max_completion_length - n_toks
+                stats[global_i]["generated_tokens"] = n_toks
+                if tokens_left[global_i] <= 0:
+                    done[global_i] = True
+                    contexts[global_i] = tokenizer.decode(toks[:tokens_left[global_i]])
+                    tokens_left[global_i] = 0
+                    stats[global_i]["generated_tokens"] = args.max_completion_length
+                    continue
 
                 contexts[global_i] = new_text
 
@@ -272,16 +270,16 @@ def generate_with_tool_batch(
                     result_text = ""
 
                 new_text = f"{args.result_tokens[0]}\n" + result_text + f"\n{args.result_tokens[1]}\n"
-                if tokenizer is not None:
-                    toks = tokenizer(new_text).input_ids
-                    n_toks = len(toks)
-                    tokens_left[global_i] -= n_toks
-                    stats[global_i]["generated_tokens"] += n_toks
-                    if tokens_left[global_i] <= 0:
-                        done[global_i] = True
-                        contexts[global_i] += tokenizer.decode(toks[:tokens_left[global_i]])
-                        stats[global_i]["generated_tokens"] = args.max_completion_length
-                        continue
+                toks = tokenizer(new_text).input_ids
+                n_toks = len(toks)
+                tokens_left[global_i] -= n_toks
+                stats[global_i]["generated_tokens"] += n_toks
+                if tokens_left[global_i] <= 0:
+                    done[global_i] = True
+                    contexts[global_i] += tokenizer.decode(toks[:tokens_left[global_i]])
+                    tokens_left[global_i] = 0
+                    stats[global_i]["generated_tokens"] = args.max_completion_length
+                    continue
                 contexts[global_i] += new_text
 
             elif tool_type == "saving":
@@ -300,13 +298,13 @@ def generate_with_tool_batch(
                 summary = f"{args.saving_tokens[0]}\n" + summary + f"\n{args.saving_tokens[1]}\n"
 
                 # reset tokens_left
-                toks = len(tokenizer(summary).input_ids)
-                tokens_left[global_i] = args.max_completion_length - toks
+                toks = tokenizer(summary).input_ids
+                tokens_left[global_i] = args.max_completion_length - len(toks)
             
                 if tokens_left[global_i] <= 0:
                     done[global_i] = True
-                    tokens_left[global_i] = 0
                     summary = tokenizer.decode(toks[:tokens_left[global_i]])
+                    tokens_left[global_i] = 0
 
                 contexts[global_i] = (
                     contexts[global_i][: prompts_len[global_i]] # has \n at the end
