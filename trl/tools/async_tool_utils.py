@@ -171,6 +171,7 @@ def _generate_with_tool(
         "num_python": 0,
         "num_retrieval": 0,
         "num_saving": 0,
+        "num_error": 0,
     }
 
     
@@ -195,6 +196,7 @@ def _generate_with_tool(
         
         detect_result = _detect_tool_use(context, prompt_idx, tokens_left, args)
         if detect_result["error_tool_use"]:
+            tool_use_stat["num_error"] += 1
             print("[ERROR] Malformed tool call detected.")
 
             

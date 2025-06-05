@@ -145,6 +145,7 @@ def generate_with_tool_batch(
             "num_python": 0,
             "num_retrieval": 0,
             "num_saving": 0,
+            "num_error": 0,
         }
         for _ in range(N)
     ]
@@ -194,6 +195,7 @@ def generate_with_tool_batch(
             # 3. Termination: error tool call OR no tool call OR ran out of budget
             # ------------------------------------------------------------------
             if not detect["tool_use"]:
+                stats[global_i]["num_error"] += 1
                 # Token exceeded limit / finished naturally via eos
                 if (tokens_left[global_i] <= 0) or (last_tok == args.eos_token):
                     done[global_i] = True

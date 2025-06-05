@@ -201,7 +201,7 @@ def generate_with_tool_batch(
     prompts_to_return = []
     tokens_left = [args.max_completion_length] * N
     done = [False] * N
-    stats = [{"generated_tokens": 0, "num_python": 0, "num_retrieval": 0, "num_saving": 0} for _ in range(N)]
+    stats = [{"generated_tokens": 0, "num_python": 0, "num_retrieval": 0, "num_saving": 0, "num_error": 0} for _ in range(N)]
 
     step = 0
     while not all(done) and step < 20:
@@ -233,6 +233,7 @@ def generate_with_tool_batch(
                 prompt_idx=len(contexts[global_i]) - len(comp_text),
             )
             if detect["error_tool_use"]:
+                stats[global_i]["num_error"] += 1
                 print(f"[{global_i}] malformed tool call – skipping tool use.")
                 contexts[global_i] += f"\n{args.result_tokens[0]}\n{args.result_tokens[1]}\n"
                 continue
