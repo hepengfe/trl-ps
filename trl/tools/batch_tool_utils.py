@@ -244,7 +244,7 @@ def generate_with_tool_batch(
                     + f"{args.tool_tokens[0]}\n" + new_python_code + f"\n{args.tool_tokens[1]}\n"
                     f"{args.result_tokens[0]}\n" + exec_out + f"\n{args.result_tokens[1]}\n"
                 )
-                toks = tokenizer(new_text[prompt_idx:]).input_ids
+                toks = tokenizer(new_text).input_ids
                 n_toks = len(toks)
                 tokens_left[global_i] = args.max_completion_length - n_toks
                 stats[global_i]["generated_tokens"] = n_toks
@@ -334,6 +334,9 @@ def generate_with_tool_batch(
     # output0a looks like “thinking, saving”, output1b looks like “saving 1, thinking 2, saving 2", output1c looks like “saving 2, thinking 3, answer”
     # prompts_to_return = [prompts[0], prompts[0], ..., prompts[2], prompts[2], prompts[0], ..., prompts[2]]
     # completions_to_return = [output0a, output0b, ..., output2a, output2b, output0c, ..., output2c]
+    # i = tokenizer(completions_to_return).input_ids
+    # if any(len(x) > args.max_completion_length for x in i):
+    #     import pdb; pdb.set_trace()
     return prompts_to_return, completions_to_return, stats
     
     # to test RL masking, comment the above return and uncomment the following
