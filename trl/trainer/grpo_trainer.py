@@ -1045,7 +1045,7 @@ class GRPOTrainer(Trainer):
         if self.args.async_infer:
             return generate_with_tool_async(questions, self.args)
         else:
-            return generate_with_tool_batch(questions, self.args, self.processing_class)
+            return generate_with_tool_batch(questions, self.args, tokenizer=self.processing_class)
         
     def _build_tool_mask_for_token(self, mask: torch.Tensor, comp_ids: torch.Tensor, token_pair: List[str]) -> torch.Tensor:
         device = self.accelerator.device
@@ -1137,14 +1137,11 @@ class GRPOTrainer(Trainer):
                         # tool inference using vllm
                         if self.accelerator.is_main_process:
                             with profiling_context(self, "vLLM.generate"):
-                                prompts, completions, tool_stats = self._generate_with_tool(all_prompts_text, 20)                                
-                            
-                            # completion_ids_ks = self.processing_class(text=list(completions.keys()))["input_ids"]
-                            # completion_ids_vs = self.processing_class(text=[v for x in completions.values() for v in x])["input_ids"]
+                                prompts, completions, tool_stats = self._generate_with_tool(all_prompts_text, 20)
+
                             completion_ids = self.processing_class(text=completions)["input_ids"]
                             prompt_ids, prompt_mask = self.processing_class(text=prompts).values()
                             n_prompts = [len(prompts)]
-                            # vs = [len(v) for v in completions.values()]
                 else:
                     completion_ids = [None] * len(all_prompts_text)
 

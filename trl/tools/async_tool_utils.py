@@ -63,12 +63,12 @@ def _detect_tool_use(context: str, prompt_idx: int) -> dict:
         "error_tool_use": False,
         "tool_start_idx": None,
     }
-
-    generated = context[prompt_idx:]
-
+    
     start_tag = "<tool_call>"
     end_tag = "</tool_call>"
     response_tag = "</tool_response>"
+    
+    generated = context[prompt_idx:]
     
     # Find the last occurrence of tool calling
     start = generated.rfind(start_tag)
@@ -106,8 +106,8 @@ def _detect_tool_use(context: str, prompt_idx: int) -> dict:
             "tool_start_idx": start,
         }
         return result
-    except Exception as e:
-        print(e)
+    except Exception as e: # json.JSONDecodeError or UnicodeDecodeError
+        print(f"Failed to parse {tool_call_raw} due to {e}")
     
     # if json parsing fails, fall back to regex
     code_match = re.search(r'"code"\s*:\s*"(.+?)"\s*}', tool_call_raw, re.DOTALL)
