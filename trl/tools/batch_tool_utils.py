@@ -72,7 +72,6 @@ def _make_tool_inference_requests_batch(
                 "max_tokens": max_tokens,
                 "guided_decoding_regex": args.vllm_guided_decoding_regex,
                 "stop": stop,
-                # "include_stop_str_in_output": True, # Will not affect whether it is in the text output; only ids
             },
             timeout=600,
         )
@@ -162,7 +161,7 @@ def generate_with_tool_batch(
 
         comp_ids_list, comp_text_list = _make_tool_inference_requests_batch(
             active_prompts,
-            max_tokens=max(tokens_left[i] for i in active_idx),
+            max_tokens=min(tokens_left[i] for i in active_idx),
             args=args,
             stop=[args.result_tokens[0], args.eos_token],
             llm=llm,
@@ -177,15 +176,6 @@ def generate_with_tool_batch(
             comp_text = comp_text_list[local_i]
 
             tokens_left[global_i] -= len(comp_ids)
-            if tokens_left[global_i] < 0: # Due to the max(tokens_left) in the request, may happen
-                comp_ids = comp_ids[:tokens_left[global_i]]
-                comp_text = tokenizer.decode(comp_ids)
-                tokens_left[global_i] = 0
-                stats[global_i]["generated_tokens"] += len(comp_ids)
-                contexts[global_i] += comp_text
-                done[global_i] = True
-                continue
-
             stats[global_i]["generated_tokens"] += len(comp_ids)
             last_tok = tokenizer.decode(comp_ids[-1])
 
@@ -193,27 +183,22 @@ def generate_with_tool_batch(
                 comp_text += args.eos_token
                 contexts[global_i] += comp_text
                 # Still need to let it detect tool use as in case of saving tool it could end with eos
-            elif last_tok == args.result_tokens[0]:
-                # comp_text += args.result_tokens[0] # will be added later
-                contexts[global_i] += comp_text
             else:
-                # Sometimes this randomly fails with tokens like " "; not sure why
-                # assert tokens_left[global_i] <= 0, (
-                #     f"Expected last token to be {args.eos_token}/{args.result_tokens[0]}/hit max len, "
-                #     f"but got {last_tok} for completion length {len(comp_ids)}."
-                # )
                 contexts[global_i] += comp_text
-                done[global_i] = True
-                continue
-
             # ------------------------------------------------------------------
             # 2. Look for tool calls
             # ------------------------------------------------------------------
             prompt_idx = len(contexts[global_i]) - len(comp_text) # != prompts_len[global_i]; as may include prior tool calls
             detect = _detect_tool_use(contexts[global_i], prompt_idx=prompts_len[global_i])
 
+            # ------------------------------------------------------------------
+            # 3. Termination: error tool call OR no tool call OR ran out of budget
+            # ------------------------------------------------------------------
             if not detect["tool_use"]:
-                done[global_i] = True
+                # Token exceeded limit / finished naturally via eos
+                if (tokens_left[global_i] <= 0) or (last_tok == args.eos_token):
+                    done[global_i] = True
+                # Else prompt may have stopped due to min tok limit/unknown issue & needs more generation
                 continue
             elif detect["error_tool_use"]:
                 print(f"[{global_i}] malformed tool call – skipping tool use.")
@@ -229,27 +214,6 @@ def generate_with_tool_batch(
                         add = ""
                 contexts[global_i] += add
                 continue
-
-            # ------------------------------------------------------------------
-            # 3. Termination: no tool call OR ran out of budget
-            # ------------------------------------------------------------------
-            # if not detect["tool_use"]:
-            #     # done[global_i] = True
-            #     # continue
-                
-            #     # Case 1: token exceeded limit for current prompt
-            #     # Case 2: current prompt finished naturally
-            #     if tokens_left[global_i] <= 0:
-            #         # contexts[global_i] += "\n</think>\n**Final Answer**\n"
-            #         done[global_i] = True
-            #         continue
-            #     elif "Final Answer" in contexts[global_i]:
-            #         done[global_i] = True
-            #         continue
-            #     # Case 3: One prompt in batch stopped because of length limit, or some unknown issue
-            #     # needed cuz of the min(tokens_left) in the request
-            #     else:
-            #         continue
 
             # ------------------------------------------------------------------
             # 4. Execute tool & insert result
@@ -334,22 +298,23 @@ def generate_with_tool_batch(
 
                 # Replace all old thinking with the summary
                 summary = f"{args.saving_tokens[0]}\n" + summary + f"\n{args.saving_tokens[1]}\n"
-                contexts[global_i] = (
-                    contexts[global_i][: prompts_len[global_i]] # has \n at the end
-                    + summary
-                )
-                if prompts[global_i].endswith("<think>\n"):
-                    contexts[global_i] += "<think>\n"
-                prompts[global_i] = contexts[global_i]
-                prompts_len[global_i] = len(contexts[global_i])
 
                 # reset tokens_left
                 toks = len(tokenizer(summary).input_ids)
                 tokens_left[global_i] = args.max_completion_length - toks
             
-            if tokens_left[global_i] <= 0:
-                done[global_i] = True
-            
+                if tokens_left[global_i] <= 0:
+                    done[global_i] = True
+                    tokens_left[global_i] = 0
+                    summary = tokenizer.decode(toks[:tokens_left[global_i]])
+
+                contexts[global_i] = (
+                    contexts[global_i][: prompts_len[global_i]] # has \n at the end
+                    + summary # TODO: Check if needs <think> at the end
+                )
+                prompts[global_i] = contexts[global_i]
+                prompts_len[global_i] = len(contexts[global_i])
+
             tool_duration = time.time() - tool_start
             print(f"[Time] {tool_type} tool call took {tool_duration:.2f} seconds")
 
@@ -372,10 +337,6 @@ def generate_with_tool_batch(
     # output0a looks like “thinking, saving”, output1b looks like “saving 1, thinking 2, saving 2", output1c looks like “saving 2, thinking 3, answer”
     # prompts_to_return = [prompts[0], prompts[0], ..., prompts[2], prompts[2], prompts[0], ..., prompts[2]]
     # completions_to_return = [output0a, output0b, ..., output2a, output2b, output0c, ..., output2c]
-    # for p,c in zip(prompts_to_return, completions_to_return):
-    #     if ("<think>" not in c) and ("saving" not in p):
-    #         print(f"[ERROR] think not found in completion: {c}")
-    #         import pdb; pdb.set_trace()
     return prompts_to_return, completions_to_return, stats
     
     # to test RL masking, comment the above return and uncomment the following
