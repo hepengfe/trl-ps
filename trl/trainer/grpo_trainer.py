@@ -1183,6 +1183,7 @@ class GRPOTrainer(Trainer):
                     self.accelerator.process_index * n_local_prompts,
                     (self.accelerator.process_index + 1) * n_local_prompts,
                 )
+                completion_ids = completion_ids_all[-n_global_prompts:][process_slice]
                 # Add saving prompts which are prepended to the completions
                 if self.tool_use:
                     # Create dict mapping from prompt idx to all saving idx for it
@@ -1209,9 +1210,6 @@ class GRPOTrainer(Trainer):
 
                     prompt_mask_all = broadcast_object_list(prompt_mask, from_process=0)
                     prompt_mask = [prompt_mask_all[j] for i in pidx for j in saving_idx_map[i]] + prompt_mask_all[-n_global_prompts:][process_slice]
-                else:
-                    completion_ids = completion_ids_all[-n_global_prompts:][process_slice]
-
 
             # Generate completions using colocated vLLM instances: each device holds vLLM copy and work on their own batch of prompts
             elif self.vllm_mode == "colocate":
