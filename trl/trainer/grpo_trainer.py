@@ -68,6 +68,7 @@ from .utils import (
 )
 from ..tools.async_tool_utils import generate_with_tool_async
 from ..tools.batch_tool_utils import generate_with_tool_batch
+# from ..tools.parallel_tool_utils import generate_with_tool_batch
 
 if is_peft_available():
     from peft import PeftConfig, get_peft_model
@@ -587,6 +588,7 @@ class GRPOTrainer(Trainer):
         self.num_completions_to_print = args.num_completions_to_print
         # maxlen is set to the total number of forward passes per step. This value of `maxlen` ensures we log only the
         # final optimization step.
+        # TODO: Maybe in case of saving (not super high prio as not all text is logged anyways)
         maxlen = self.accelerator.num_processes * args.per_device_train_batch_size * args.gradient_accumulation_steps
         self._textual_logs = {
             "prompt": deque(maxlen=maxlen),
@@ -1157,6 +1159,8 @@ class GRPOTrainer(Trainer):
                             self._metrics[mode]["tools/num_retrieval"].append(tool_stats["num_retrieval"])
                             self._metrics[mode]["tools/num_saving"].append(tool_stats["num_saving"])
                             self._metrics[mode]["tools/num_error"].append(tool_stats["num_error"])
+
+                            print("Tool stats", tool_stats)
                 else:
                     completion_ids = [None] * len(all_prompts_text)
 
@@ -1179,13 +1183,12 @@ class GRPOTrainer(Trainer):
                     self.accelerator.process_index * n_local_prompts,
                     (self.accelerator.process_index + 1) * n_local_prompts,
                 )
-                completion_ids = completion_ids[-n_global_prompts:][process_slice]
                 # Add saving prompts which are prepended to the completions
                 if self.tool_use:
                     # Create dict mapping from prompt idx to all saving idx for it
                     saving_idx_map = {i: [] for i in range(n_global_prompts)}
                     idx = 0
-                    for i, c in enumerate(completion_ids_all[-n_global_prompts:]):
+                    for i, c in enumerate(completion_ids_all[-n_global_prompts:]): # Iterate through final completions
                         # Check if continuation has saving
                         if self.processing_class.convert_tokens_to_ids(self.args.saving_tokens[0]) in c:
                             # Check how many savings
@@ -1206,6 +1209,9 @@ class GRPOTrainer(Trainer):
 
                     prompt_mask_all = broadcast_object_list(prompt_mask, from_process=0)
                     prompt_mask = [prompt_mask_all[j] for i in pidx for j in saving_idx_map[i]] + prompt_mask_all[-n_global_prompts:][process_slice]
+                else:
+                    completion_ids = completion_ids_all[-n_global_prompts:][process_slice]
+
 
             # Generate completions using colocated vLLM instances: each device holds vLLM copy and work on their own batch of prompts
             elif self.vllm_mode == "colocate":

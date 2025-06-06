@@ -284,7 +284,6 @@ def generate_with_tool_batch(
             tool_duration = time.time() - tool_start
             print(f"[Time] {tool_duration:.2f} seconds for {len(tool_jobs)} parallel tool calls. Avg {tool_duration / len(tool_jobs):.2f} seconds.")
 
-
     contexts_to_return.extend(contexts)
     prompts_to_return.extend(prompts)
     for i, context in enumerate(contexts):
