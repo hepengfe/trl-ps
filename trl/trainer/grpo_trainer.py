@@ -1142,6 +1142,21 @@ class GRPOTrainer(Trainer):
                             completion_ids = self.processing_class(text=completions)["input_ids"]
                             prompt_ids, prompt_mask = self.processing_class(text=prompts).values()
                             n_prompts = [len(prompts)]
+                            # vs = [len(v) for v in completions.values()]
+
+                            # avg tool_stats
+                            tool_stats_avg = {}
+                            for d in tool_stats:
+                                for k, v in d.items():
+                                    if k not in tool_stats_avg:
+                                        tool_stats_avg[k] = []
+                                    tool_stats_avg[k].append(v)
+                            tool_stats = {k: sum(v) / len(v) for k, v in tool_stats_avg.items()}
+                            self._metrics[mode]["tools/generated_tokens"].append(tool_stats["generated_tokens"])
+                            self._metrics[mode]["tools/num_python"].append(tool_stats["num_python"])
+                            self._metrics[mode]["tools/num_retrieval"].append(tool_stats["num_retrieval"])
+                            self._metrics[mode]["tools/num_saving"].append(tool_stats["num_saving"])
+                            self._metrics[mode]["tools/num_error"].append(tool_stats["num_error"])
                 else:
                     completion_ids = [None] * len(all_prompts_text)
 

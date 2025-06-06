@@ -63,10 +63,11 @@ def _detect_tool_use(context: str, prompt_idx: int) -> dict:
         "error_tool_use": False,
         "tool_start_idx": None,
     }
-    
     start_tag = "<tool_call>"
     end_tag = "</tool_call>"
     response_tag = "</tool_response>"
+
+    generated = context[prompt_idx:]
     
     generated = context[prompt_idx:]
     
@@ -86,7 +87,6 @@ def _detect_tool_use(context: str, prompt_idx: int) -> dict:
     
     # If </tool_call> is not at the end of the generation because of vllm stop
     # then end = -1
-    
     if end == -1:
         tool_call_raw = generated[start + len(start_tag):].strip()
     else:
@@ -171,6 +171,7 @@ def _generate_with_tool(
         "num_python": 0,
         "num_retrieval": 0,
         "num_saving": 0,
+        "num_error": 0,
     }
 
     
@@ -195,6 +196,7 @@ def _generate_with_tool(
         
         detect_result = _detect_tool_use(context, prompt_idx, tokens_left, args)
         if detect_result["error_tool_use"]:
+            tool_use_stat["num_error"] += 1
             print("[ERROR] Malformed tool call detected.")
 
             
