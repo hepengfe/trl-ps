@@ -37,8 +37,7 @@ def count_tokens(text, model_name=None):
         encoding = tiktoken.encoding_for_model(model_name)
     except:
         encoding = tiktoken.get_encoding("cl100k_base")
-    tokens = encoding.encode(text)
-    return len(tokens)
+    return len(encoding.encode(text))
 
 def remove_python_prefix(text):
     if text.startswith("```python") and text.rstrip().endswith("```"):
@@ -47,6 +46,13 @@ def remove_python_prefix(text):
         return "\n".join(lines[1:-1])
     return text
 
+import concurrent.futures
+
+def run_with_timeout(func, args=(), kwargs=None, timeout=30):
+    kwargs = kwargs or {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(func, *args, **kwargs)
+        return future.result(timeout=timeout)
 
 def google_retriever(query, retrieve_websites = 2):
     '''
@@ -61,7 +67,7 @@ def google_retriever(query, retrieve_websites = 2):
             'num': retrieve_websites # The number of websites you want.
     }    
     #TODO: There might some connection error when we call httpx.get. Simply recall will resolve this error.
-    response = httpx.get(base_url, params=params,timeout=5)
+    response = httpx.get(base_url, params=params, timeout=5)
     response.raise_for_status()
     data = response.json()
     import openai
@@ -73,20 +79,23 @@ def google_retriever(query, retrieve_websites = 2):
     #     )
         
     urls = [item.get('link', '') for item in data.get('items', [])]
-    
+    reader = SimpleWebPageReader(html_to_text=True)
+
     for i in range(retrieve_websites):
         try:
-            document = SimpleWebPageReader(html_to_text=True).load_data(
-            [urls[i]]
-            )
+            # Sometimes this hangs for very long so allow for timeout
+            document = run_with_timeout(reader.load_data, args=([urls[i]],), timeout=30)
             index = SummaryIndex.from_documents(document)
             llm = OpenAI(model=base_model)
             query_engine = index.as_query_engine(llm=llm)
-            if count_tokens(query)>80000:
+            if count_tokens(query) > 80000:
                 continue
             else:
                 response = query_engine.query(query + ' Use only one paragraph to summarize your answer.')
             return response
+        except concurrent.futures.TimeoutError:
+            print(f"Timeout while loading URL: {urls[i]}")
+            continue
         except Exception as e:
             print(e)
             continue
