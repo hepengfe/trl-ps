@@ -237,13 +237,14 @@ def generate_with_tool_batch(
                 print(f"[{global_i}] malformed tool call – skipping tool use.")
                 contexts[global_i] += f"\n{args.result_tokens[0]}\n{args.result_tokens[1]}\n"
                 continue
-            
+
             if not detect["tool_use"]:
-                if tokens_left[global_i] <= 0 or "Final Answer" in contexts[global_i]:
+                if (tokenizer.decode(comp_ids[-1]) == args.eos_token) and not(contexts[global_i].endswith(args.eos_token)):
+                    contexts[global_i] += args.eos_token
                     done[global_i] = True
-                    continue
-                else:
-                    continue
+                elif tokens_left[global_i] <= 0:
+                    done[global_i] = True
+                continue
 
             tool_type = detect["tool_type"]
             if tool_type == "saving":
@@ -253,8 +254,8 @@ def generate_with_tool_batch(
                 except:
                     summary = ""
 
-                contexts_to_return.append(contexts[global_i] + f"\n{args.eos_token}\n")
-                completions_to_return.append(contexts[global_i][prompts_len[global_i]:] + f"\n{args.eos_token}\n")
+                contexts_to_return.append(contexts[global_i] + args.eos_token)
+                completions_to_return.append(contexts[global_i][prompts_len[global_i]:] + args.eos_token)
                 prompts_to_return.append(contexts[global_i][:prompts_len[global_i]])
 
                 contexts[global_i] = (
@@ -272,9 +273,14 @@ def generate_with_tool_batch(
             with ThreadPoolExecutor(max_workers=min(len(tool_jobs), os.cpu_count())) as executor:
                 results = list(executor.map(_execute_tool_job, tool_jobs))
 
-
             for global_i, tool_type, updated_context in results:
-                # TODO: manage token counting
+                toks = tokenizer(updated_context).input_ids
+                n_toks = len(toks)
+                if n_toks > args.max_completion_length:
+                    done[global_i] = True
+                    updated_context = tokenizer.decode(toks[:args.max_completion_length])
+                    n_toks = args.max_completion_length
+                tokens_left[global_i] = args.max_completion_length - n_toks
                 contexts[global_i] = updated_context
                 if tool_type == "python":
                     stats[global_i]["num_python"] += 1

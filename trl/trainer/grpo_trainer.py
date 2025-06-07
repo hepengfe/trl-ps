@@ -67,8 +67,8 @@ from .utils import (
     selective_log_softmax,
 )
 from ..tools.async_tool_utils import generate_with_tool_async
-from ..tools.batch_tool_utils import generate_with_tool_batch
-# from ..tools.parallel_tool_utils import generate_with_tool_batch
+# from ..tools.batch_tool_utils import generate_with_tool_batch
+from ..tools.parallel_tool_utils import generate_with_tool_batch
 
 if is_peft_available():
     from peft import PeftConfig, get_peft_model
@@ -1357,7 +1357,7 @@ class GRPOTrainer(Trainer):
                             completions=completions[-n_local_prompts:], **reward_kwargs
                         )
                         output_reward_func = [
-                            output_reward_func[local_i] for i, local_i in enumerate(pidx) for _ in saving_idx_map[i]
+                            output_reward_func[local_i] for local_i, i in enumerate(pidx) for _ in saving_idx_map[i]
                         ] + output_reward_func
                     else:
                         output_reward_func = reward_func(prompts=prompts, completions=completions, **reward_kwargs)
