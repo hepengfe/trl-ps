@@ -588,7 +588,7 @@ class GRPOTrainer(Trainer):
         self.num_completions_to_print = args.num_completions_to_print
         # maxlen is set to the total number of forward passes per step. This value of `maxlen` ensures we log only the
         # final optimization step.
-        # TODO: Maybe in case of saving (not super high prio as not all text is logged anyways)
+        # TODO: Change in case of saving (not super high prio as not all text is logged anyways)
         maxlen = self.accelerator.num_processes * args.per_device_train_batch_size * args.gradient_accumulation_steps
         self._textual_logs = {
             "prompt": deque(maxlen=maxlen),
@@ -1324,7 +1324,7 @@ class GRPOTrainer(Trainer):
         else:
             completions = completions_text
 
-        rewards_per_func = torch.zeros(len(prompts_text), len(self.reward_funcs), device=device)
+        rewards_per_func = torch.zeros(len(completions), len(self.reward_funcs), device=device)
         for i, (reward_func, reward_processing_class, reward_func_name) in enumerate(
             zip(self.reward_funcs, self.reward_processing_classes, self.reward_func_names)
         ):
