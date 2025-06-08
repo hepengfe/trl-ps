@@ -1417,6 +1417,7 @@ class GRPOTrainer(Trainer):
 
             mean_grouped_rewards = mean_grouped_rewards.repeat_interleave(self.num_generations, dim=0)
             std_grouped_rewards = std_grouped_rewards.repeat_interleave(self.num_generations, dim=0)
+            is_std_zero = torch.isclose(std_grouped_rewards, torch.zeros_like(std_grouped_rewards))
             # Compute advantages
             for k, vs in saving_idx_map.items():
                 for v in vs:
@@ -1433,6 +1434,7 @@ class GRPOTrainer(Trainer):
                 rewards[idx],
                 rewards[-n_global_prompts:][process_slice],
             ], dim=0)
+            all_process_advantages = rewards.clone()  # keep the aggregated advantages for logging
         else:
             # Compute grouped-wise rewards
             mean_grouped_rewards = rewards.view(-1, self.num_generations).mean(dim=1)
