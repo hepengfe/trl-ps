@@ -25,8 +25,9 @@ class GRPOConfig(TrainingArguments):
     r"""
     Configuration class for the [`GRPOTrainer`].
 
-    Only the parameters specific to GRPO training are listed here. For details on other parameters, refer to the
-    [`~transformers.TrainingArguments`] documentation.
+    This class includes only the parameters that are specific to GRPO training. For a full list of training arguments,
+    please refer to the [`~transformers.TrainingArguments`] documentation. Note that default values in this class may
+    differ from those in [`~transformers.TrainingArguments`].
 
     Using [`~transformers.HfArgumentParser`] we can turn this class into
     [argparse](https://docs.python.org/3/library/argparse#module-argparse) arguments that can be specified on the
@@ -69,14 +70,14 @@ class GRPOConfig(TrainingArguments):
             `per_device_train_batch_size * num_processes * gradient_accumulation_steps`.
         steps_per_generations: (`int` or `None`, *optional*, defaults to `None`):
             Number of optimization steps per generation. If `None`, it defaults to gradient_accumulation_steps.
-        temperature (`float`, defaults to `0.9`):
+        temperature (`float`, defaults to `1.0`):
             Temperature for sampling. The higher the temperature, the more random the completions.
         top_p (`float`, *optional*, defaults to `1.0`):
             Float that controls the cumulative probability of the top tokens to consider. Must be in (0, 1]. Set to
             `1.0` to consider all tokens.
-        top_k (`int` or `None`, *optional*, defaults to `50`):
+        top_k (`int` or `None`, *optional*, defaults to `None`):
             Number of highest probability vocabulary tokens to keep for top-k-filtering. If `None`, top-k-filtering is
-            disabled.
+            disabled and all tokens are considered.
         min_p (`float` or `None`, *optional*, defaults to `None`):
             Minimum token probability, which will be scaled by the probability of the most likely token. It must be a
             value between `0.0` and `1.0`. Typical values are in the `0.01-0.2` range.
@@ -104,11 +105,13 @@ class GRPOConfig(TrainingArguments):
             Regex for vLLM guided decoding. If `None` (default), guided decoding is disabled.
 
         > Parameters that control the vLLM server (only used when `vllm_mode` is `"server"`)
-
+        vllm_server_base_url (`str` or `None`, *optional*, defaults to `None`):
+            Base URL for the vLLM server (e.g., `"http://localhost:8000"`). If provided, `vllm_server_host` and
+            `vllm_server_port` are ignored.
         vllm_server_host (`str`, *optional*, defaults to `"0.0.0.0"`):
-            Host of the vLLM server to connect to.
+            Host of the vLLM server to connect to. Ignored if `vllm_server_base_url` is provided.
         vllm_server_port (`int`, *optional*, defaults to `8000`):
-            Port of the vLLM server to connect to.
+            Port of the vLLM server to connect to. Ignored if `vllm_server_base_url` is provided.
         vllm_server_timeout (`float`, *optional*, defaults to `240.0`):
             Total timeout duration in seconds to wait for the vLLM server to be up. If the server is not up after the
             timeout, a `ConnectionError` is raised.
@@ -126,16 +129,17 @@ class GRPOConfig(TrainingArguments):
 
         > Parameters that control the training
 
-        learning_rate (`float`, *optional*, defaults to `1e-6`):
-            Initial learning rate for [`AdamW`] optimizer. The default value replaces that of
-            [`~transformers.TrainingArguments`].
-        beta (`float`, *optional*, defaults to `0.04`):
-            KL coefficient. If `0.0`, the reference model is not loaded, reducing memory usage and improving training
-            speed, but may be numerically unstable for long training runs.
+        beta (`float`, *optional*, defaults to `0.0`):
+            KL coefficient. If `0.0` (default), the reference model is not loaded, reducing memory usage and improving
+            training speed.
         num_iterations (`int`, *optional*, defaults to `1`):
             Number of iterations per batch (denoted as μ in the algorithm).
         epsilon (`float`, *optional*, defaults to `0.2`):
             Epsilon value for clipping.
+        delta: (`float` or `None`, *optional*, defaults to `None`):
+            Enables the upper clipping bound in two-sided GRPO loss when set to a float. If `None` (default), standard
+            GRPO clipping is used. Recommended to be greater than `1 + ε` when enabled. This method is introduced in
+            the [INTELLECT-2 tech report](https://huggingface.co/papers/2505.07291).
         epsilon_high (`float` or `None`, *optional*, defaults to `None`):
             Upper-bound epsilon value for clipping. If not specified, it defaults to the same value as the lower-bound
             specified in argument `epsilon`. Paper [DAPO](https://huggingface.co/papers/2503.14476) recommends `0.28`.
@@ -198,6 +202,21 @@ class GRPOConfig(TrainingArguments):
         _VALID_DICT_FIELDS.append("model_init_kwargs")
     else:
         _VALID_DICT_FIELDS = TrainingArguments._VALID_DICT_FIELDS + ["model_init_kwargs"]
+
+    # Parameters whose default values are overridden from TrainingArguments
+    learning_rate: float = field(
+        default=1e-6,
+        metadata={"help": "The initial learning rate for AdamW."},
+    )
+    logging_steps: float = field(
+        default=10,
+        metadata={
+            "help": (
+                "Log every X updates steps. Should be an integer or a float in range `[0,1)`. "
+                "If smaller than 1, will be interpreted as ratio of total training steps."
+            )
+        },
+    )
 
     # Parameters that control the model and reference model
     model_init_kwargs: Optional[Union[dict, str]] = field(
@@ -271,7 +290,7 @@ class GRPOConfig(TrainingArguments):
         },
     )
     temperature: float = field(
-        default=0.9,
+        default=1.0,
         metadata={"help": "Temperature for sampling. The higher the temperature, the more random the completions."},
     )
     top_p: float = field(
@@ -282,10 +301,10 @@ class GRPOConfig(TrainingArguments):
         },
     )
     top_k: Optional[int] = field(
-        default=50,
+        default=None,
         metadata={
             "help": "Number of highest probability vocabulary tokens to keep for top-k-filtering. If `None`, "
-            "top-k-filtering is disabled."
+            "top-k-filtering is disabled and all tokens are considered."
         },
     )
     min_p: Optional[float] = field(
@@ -316,6 +335,13 @@ class GRPOConfig(TrainingArguments):
             "generation instead of the default model.generate(). Requires `vllm` to be installed."
         },
     )
+    vllm_server_base_url: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": "Base URL for the vLLM server (e.g., 'http://localhost:8000'). If provided, `vllm_server_host` "
+            "and `vllm_server_port` are ignored."
+        },
+    )
     vllm_mode: str = field(
         default="server",
         metadata={
@@ -334,11 +360,11 @@ class GRPOConfig(TrainingArguments):
     # Parameters that control the vLLM server (only used when `vllm_mode` is `"server"`)
     vllm_server_host: str = field(
         default="0.0.0.0",
-        metadata={"help": "Host of the vLLM server to connect to."},
+        metadata={"help": "Host of the vLLM server to connect to. Ignored if vllm_server_base_url is provided."},
     )
     vllm_server_port: int = field(
         default=8000,
-        metadata={"help": "Port of the vLLM server to connect to."},
+        metadata={"help": "Port of the vLLM server to connect to. Ignored if vllm_server_base_url is provided."},
     )
     vllm_server_timeout: float = field(
         default=240.0,
@@ -367,18 +393,11 @@ class GRPOConfig(TrainingArguments):
     )
 
     # Parameters that control the training
-    learning_rate: float = field(
-        default=1e-6,
-        metadata={
-            "help": "Initial learning rate for `AdamW` optimizer. The default value replaces that of "
-            "`transformers.TrainingArguments`."
-        },
-    )
     beta: float = field(
-        default=0.04,
+        default=0.0,
         metadata={
-            "help": "KL coefficient. If `0.0`, the reference model is not loaded, reducing memory usage and improving "
-            "training speed, but may be numerically unstable for long training runs."
+            "help": "KL coefficient. If `0.0` (default), the reference model is not loaded, reducing memory usage and "
+            "improving training speed."
         },
     )
     num_iterations: int = field(
@@ -388,6 +407,14 @@ class GRPOConfig(TrainingArguments):
     epsilon: float = field(
         default=0.2,
         metadata={"help": "Epsilon value for clipping."},
+    )
+    delta: Optional[float] = field(
+        default=None,
+        metadata={
+            "help": "Enables the upper clipping bound in two-sided GRPO loss when set to a float. If `None` "
+            "(default), standard GRPO clipping is used. Recommended to be greater than `1 + ε` when enabled. This "
+            "method is introduced in the [INTELLECT-2 tech report](https://huggingface.co/papers/2505.07291)."
+        },
     )
     epsilon_high: Optional[float] = field(
         default=None,
@@ -536,3 +563,5 @@ class GRPOConfig(TrainingArguments):
                     "current global eval batch size, the valid values for the number of generations are: "
                     f"{possible_values}."
                 )
+        if self.delta is not None and self.use_liger_loss:
+            raise ValueError("Liger loss does not support two-sided GRPO loss yet.")

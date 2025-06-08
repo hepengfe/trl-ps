@@ -219,37 +219,6 @@ trl dpo --config dpo_config.yaml
 </hfoption>
 </hfoptions>
 
-## Chat Interface
-
-<Tip warning={true}>
-
-The chat interface is deprecated and will be removed in TRL 0.19. Use `transformers-cli chat` instead. For more information, see the [Transformers documentation, chat with text generation models](https://huggingface.co/docs/transformers/quicktour#chat-with-text-generation-models).
-
-</Tip>
-
-The chat CLI lets you quickly load the model and talk to it. Simply run the following:
-
-<pre><code>$ trl chat --model_name_or_path Qwen/Qwen1.5-0.5B-Chat 
-<strong><span style="color: red;">&lt;quentin_gallouedec&gt;:</span></strong>
-What is the best programming language?
-
-<strong><span style="color: blue;">&lt;Qwen/Qwen1.5-0.5B-Chat&gt;:</span></strong>
-There isn't a "best" programming language, as everyone has different style preferences, needs, and preferences. However, some people commonly use   
-languages like Python, Java, C++, and JavaScript, which are popular among developers for a variety of reasons, including readability, flexibility,  
-and scalability. Ultimately, it depends on personal preference, needs, and goals.
-</code></pre>
-
-Note that the chat interface relies on the tokenizer's [chat template](https://huggingface.co/docs/transformers/chat_templating) to format the inputs for the model. Make sure your tokenizer has a chat template defined.
-
-Besides talking to the model there are a few commands you can use:
-
-- `clear`: clears the current conversation and start a new one
-- `example {NAME}`: load example named `{NAME}` from the config and use it as the user input
-- `set {SETTING_NAME}={SETTING_VALUE};`: change the system prompt or generation settings (multiple settings are separated by a `;`).
-- `reset`: same as clear but also resets the generation configs to defaults if they have been changed by `set`
-- `save` or `save {SAVE_NAME}`: save the current chat and settings to file by default to `./chat_history/{MODEL_NAME}/chat_{DATETIME}.yaml` or `{SAVE_NAME}` if provided
-- `exit`: closes the interface
-
 ## Getting the System Information
 
 You can get the system information by running the following command:
@@ -258,7 +227,7 @@ You can get the system information by running the following command:
 trl env
 ```
 
-This will print out the system information including the GPU information, the CUDA version, the PyTorch version, the transformers version, and the TRL version, and any optional dependencies that are installed.
+This will print out the system information, including the GPU information, the CUDA version, the PyTorch version, the transformers version, the TRL version, and any optional dependencies that are installed.
 
 ```txt
 Copy-paste the following information when reporting an issue:
@@ -266,7 +235,7 @@ Copy-paste the following information when reporting an issue:
 - Platform: Linux-5.15.0-1048-aws-x86_64-with-glibc2.31
 - Python version: 3.11.9
 - PyTorch version: 2.4.1
-- CUDA device: NVIDIA H100 80GB HBM3
+- accelerator(s): NVIDIA H100 80GB HBM3
 - Transformers version: 4.45.0.dev0
 - Accelerate version: 0.34.2
 - Accelerate config: 
@@ -297,6 +266,7 @@ Copy-paste the following information when reporting an issue:
 - LLM-Blender version: 0.0.2
 - OpenAI version: 1.46.0
 - PEFT version: 0.12.0
+- vLLM version: not installed
 ```
 
-This information are required when reporting an issue.
+This information is required when reporting an issue.

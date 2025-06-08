@@ -809,12 +809,12 @@ class GRPOTrainerTester(unittest.TestCase):
                 new_param = trainer.model.get_parameter(n)
                 self.assertFalse(torch.equal(param, new_param), f"Parameter {n} has not changed.")
 
-    def test_beta_zero_no_ref_model_and_no_kl(self):
+    def test_training_beta_non_zero(self):
         dataset = load_dataset("trl-internal-testing/zen", "standard_prompt_only", split="train")
         with tempfile.TemporaryDirectory() as tmp_dir:
             training_args = GRPOConfig(
                 output_dir=tmp_dir,
-                beta=0.0,  # set beta to 0 to test the case where the reference model is not used
+                beta=0.1,  # set beta to non-zero value to test the case where the reference model is used
                 learning_rate=0.1,  # increase the learning rate to speed up the test
                 per_device_train_batch_size=3,  # reduce the batch size to reduce memory usage
                 num_generations=3,  # reduce the number of generations to reduce memory usage
@@ -1128,6 +1128,37 @@ class GRPOTrainerTester(unittest.TestCase):
                 max_completion_length=8,  # reduce the completion length to reduce memory usage
                 num_generations=6,  # the number of generations is larger than the batch size, but
                 gradient_accumulation_steps=2,  # gradient accumulation should allow that
+                report_to="none",
+            )
+            trainer = GRPOTrainer(
+                model="trl-internal-testing/tiny-Qwen2ForCausalLM-2.5",
+                reward_funcs="trl-internal-testing/tiny-Qwen2ForSequenceClassification-2.5",
+                args=training_args,
+                train_dataset=dataset,
+            )
+
+            previous_trainable_params = {n: param.clone() for n, param in trainer.model.named_parameters()}
+
+            trainer.train()
+
+            self.assertIsNotNone(trainer.state.log_history[-1]["train_loss"])
+
+            # Check that the params have changed
+            for n, param in previous_trainable_params.items():
+                new_param = trainer.model.get_parameter(n)
+                self.assertFalse(torch.equal(param, new_param), f"Parameter {n} has not changed.")
+
+    def test_training_delta_clipping(self):
+        dataset = load_dataset("trl-internal-testing/zen", "standard_prompt_only", split="train")
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            training_args = GRPOConfig(
+                output_dir=tmp_dir,
+                learning_rate=0.1,  # increase the learning rate to speed up the test
+                per_device_train_batch_size=3,  # reduce the batch size to reduce memory usage
+                num_generations=3,  # reduce the number of generations to reduce memory usage
+                max_completion_length=8,  # reduce the completion length to reduce memory usage
+                delta=2.0,  # set delta to a non-None value
                 report_to="none",
             )
             trainer = GRPOTrainer(
