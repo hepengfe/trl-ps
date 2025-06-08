@@ -224,14 +224,12 @@ def generate_with_tool_batch(
         for local_i, global_i in enumerate(active_idx):
             comp_ids = comp_ids_list[local_i]
             comp_text = comp_text_list[local_i]
+            prompt_idx = len(contexts[global_i])
             contexts[global_i] += comp_text
             stats[global_i]["generated_tokens"] += len(comp_ids)
             tokens_left[global_i] -= len(comp_ids)
 
-            detect = _detect_tool_use(
-                contexts[global_i],
-                prompt_idx=len(contexts[global_i]) - len(comp_text),
-            )
+            detect = _detect_tool_use(contexts[global_i], prompt_idx=prompt_idx)
             if detect["error_tool_use"]:
                 stats[global_i]["num_error"] += 1
                 print(f"[{global_i}] malformed tool call – skipping tool use.")
@@ -260,11 +258,15 @@ def generate_with_tool_batch(
 
                 contexts[global_i] = (
                     contexts[global_i][:prompts_len[global_i]]
-                    + f"\n{args.saving_tokens[0]}\n{summary}\n{args.saving_tokens[1]}\n"
+                    + f"{args.saving_tokens[0]}\n{summary}\n{args.saving_tokens[1]}\n"
                 )
+                prompts[global_i] = contexts[global_i]
+                # Increase the prompt length such that the summary will be in the prompt returned
+                # but also subtract from tokens left to reduce the budget
+                # (alternatively could force summary to be within args.max prompt length)
+                prompts_len[global_i] = len(contexts[global_i])
                 toks = len(tokenizer(f"\n{args.saving_tokens[0]}\n" + summary + f"\n{args.saving_tokens[1]}\n").input_ids)
                 tokens_left[global_i] = args.max_completion_length - toks
-
             else:
                 tool_jobs.append((global_i, deepcopy(detect), contexts[global_i], args, tokenizer))
 

@@ -1144,7 +1144,6 @@ class GRPOTrainer(Trainer):
                             completion_ids = self.processing_class(text=completions)["input_ids"]
                             prompt_ids, prompt_mask = self.processing_class(text=prompts).values()
                             n_prompts = [len(prompts)]
-                            # vs = [len(v) for v in completions.values()]
 
                             # avg tool_stats
                             tool_stats_avg = {}
@@ -1193,7 +1192,7 @@ class GRPOTrainer(Trainer):
                         # Check if continuation has saving
                         if self.processing_class.convert_tokens_to_ids(self.args.saving_tokens[0]) in c:
                             # Check how many savings
-                            saving_idx_map[i].append(idx) # first one has no saving token but the tool call
+                            saving_idx_map[i].append(idx) # first one has no saving token but the tool call e.g. <tool_call>\n{"name": "saving", "arguments": {...
                             idx += 1
                             while self.processing_class.convert_tokens_to_ids(self.args.saving_tokens[0]) in completion_ids_all[idx]:
                                 saving_idx_map[i].append(idx)

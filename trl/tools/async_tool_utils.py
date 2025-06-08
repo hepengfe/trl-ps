@@ -69,8 +69,6 @@ def _detect_tool_use(context: str, prompt_idx: int) -> dict:
 
     generated = context[prompt_idx:]
     
-    generated = context[prompt_idx:]
-    
     # Find the last occurrence of tool calling
     start = generated.rfind(start_tag)
     # no tool call detected
@@ -92,6 +90,7 @@ def _detect_tool_use(context: str, prompt_idx: int) -> dict:
     else:
         tool_call_raw = generated[start + len(start_tag):end].strip()
     
+    start += prompt_idx # Make it global i.e. full context index
     try:            
         tool_call_raw = tool_call_raw.encode('utf-8').decode('unicode_escape').strip()
         # tool_call_raw = re.sub(r'(?<!\\)\n', r'\\n', tool_call_raw)
