@@ -135,7 +135,7 @@ def _execute_tool_job(args):
             new_python_code = json.dumps({
                 "name": "python",
                 "arguments": {"code": new_code}
-            })
+            }, ensure_ascii=False)
             
             python_start_idx = detect["tool_start_idx"]
             context = (
@@ -224,26 +224,25 @@ def generate_with_tool_batch(
         for local_i, global_i in enumerate(active_idx):
             comp_ids = comp_ids_list[local_i]
             comp_text = comp_text_list[local_i]
+            prompt_idx = len(contexts[global_i])
             contexts[global_i] += comp_text
             stats[global_i]["generated_tokens"] += len(comp_ids)
             tokens_left[global_i] -= len(comp_ids)
 
-            detect = _detect_tool_use(
-                contexts[global_i],
-                prompt_idx=len(contexts[global_i]) - len(comp_text),
-            )
+            detect = _detect_tool_use(contexts[global_i], prompt_idx=prompt_idx)
             if detect["error_tool_use"]:
                 stats[global_i]["num_error"] += 1
                 print(f"[{global_i}] malformed tool call – skipping tool use.")
                 contexts[global_i] += f"\n{args.result_tokens[0]}\n{args.result_tokens[1]}\n"
                 continue
-            
+
             if not detect["tool_use"]:
-                if tokens_left[global_i] <= 0 or "Final Answer" in contexts[global_i]:
+                if (tokenizer.decode(comp_ids[-1]) == args.eos_token) and not(contexts[global_i].endswith(args.eos_token)):
+                    contexts[global_i] += args.eos_token
                     done[global_i] = True
-                    continue
-                else:
-                    continue
+                elif tokens_left[global_i] <= 0:
+                    done[global_i] = True
+                continue
 
             tool_type = detect["tool_type"]
             if tool_type == "saving":
@@ -253,17 +252,21 @@ def generate_with_tool_batch(
                 except:
                     summary = ""
 
-                contexts_to_return.append(contexts[global_i] + f"\n{args.eos_token}\n")
-                completions_to_return.append(contexts[global_i][prompts_len[global_i]:] + f"\n{args.eos_token}\n")
+                contexts_to_return.append(contexts[global_i] + args.eos_token)
+                completions_to_return.append(contexts[global_i][prompts_len[global_i]:] + args.eos_token)
                 prompts_to_return.append(contexts[global_i][:prompts_len[global_i]])
 
                 contexts[global_i] = (
                     contexts[global_i][:prompts_len[global_i]]
-                    + f"\n{args.saving_tokens[0]}\n{summary}\n{args.saving_tokens[1]}\n"
+                    + f"{args.saving_tokens[0]}\n{summary}\n{args.saving_tokens[1]}\n"
                 )
+                prompts[global_i] = contexts[global_i]
+                # Increase the prompt length such that the summary will be in the prompt returned
+                # but also subtract from tokens left to reduce the budget
+                # (alternatively could force summary to be within args.max prompt length)
+                prompts_len[global_i] = len(contexts[global_i])
                 toks = len(tokenizer(f"\n{args.saving_tokens[0]}\n" + summary + f"\n{args.saving_tokens[1]}\n").input_ids)
                 tokens_left[global_i] = args.max_completion_length - toks
-
             else:
                 tool_jobs.append((global_i, deepcopy(detect), contexts[global_i], args, tokenizer))
 
@@ -272,9 +275,14 @@ def generate_with_tool_batch(
             with ThreadPoolExecutor(max_workers=min(len(tool_jobs), os.cpu_count())) as executor:
                 results = list(executor.map(_execute_tool_job, tool_jobs))
 
-
             for global_i, tool_type, updated_context in results:
-                # TODO: manage token counting
+                toks = tokenizer(updated_context).input_ids
+                n_toks = len(toks)
+                if n_toks > args.max_completion_length:
+                    done[global_i] = True
+                    updated_context = tokenizer.decode(toks[:args.max_completion_length])
+                    n_toks = args.max_completion_length
+                tokens_left[global_i] = args.max_completion_length - n_toks
                 contexts[global_i] = updated_context
                 if tool_type == "python":
                     stats[global_i]["num_python"] += 1
@@ -283,7 +291,6 @@ def generate_with_tool_batch(
         
             tool_duration = time.time() - tool_start
             print(f"[Time] {tool_duration:.2f} seconds for {len(tool_jobs)} parallel tool calls. Avg {tool_duration / len(tool_jobs):.2f} seconds.")
-
 
     contexts_to_return.extend(contexts)
     prompts_to_return.extend(prompts)

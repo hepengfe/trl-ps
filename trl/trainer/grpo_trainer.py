@@ -67,7 +67,8 @@ from .utils import (
     selective_log_softmax,
 )
 from ..tools.async_tool_utils import generate_with_tool_async
-from ..tools.batch_tool_utils import generate_with_tool_batch
+# from ..tools.batch_tool_utils import generate_with_tool_batch
+from ..tools.parallel_tool_utils import generate_with_tool_batch
 
 if is_peft_available():
     from peft import PeftConfig, get_peft_model
@@ -587,6 +588,7 @@ class GRPOTrainer(Trainer):
         self.num_completions_to_print = args.num_completions_to_print
         # maxlen is set to the total number of forward passes per step. This value of `maxlen` ensures we log only the
         # final optimization step.
+        # TODO: Change in case of saving (not super high prio as not all text is logged anyways)
         maxlen = self.accelerator.num_processes * args.per_device_train_batch_size * args.gradient_accumulation_steps
         self._textual_logs = {
             "prompt": deque(maxlen=maxlen),
@@ -1142,7 +1144,6 @@ class GRPOTrainer(Trainer):
                             completion_ids = self.processing_class(text=completions)["input_ids"]
                             prompt_ids, prompt_mask = self.processing_class(text=prompts).values()
                             n_prompts = [len(prompts)]
-                            # vs = [len(v) for v in completions.values()]
 
                             # avg tool_stats
                             tool_stats_avg = {}
@@ -1157,6 +1158,8 @@ class GRPOTrainer(Trainer):
                             self._metrics[mode]["tools/num_retrieval"].append(tool_stats["num_retrieval"])
                             self._metrics[mode]["tools/num_saving"].append(tool_stats["num_saving"])
                             self._metrics[mode]["tools/num_error"].append(tool_stats["num_error"])
+
+                            print("Tool stats", tool_stats)
                 else:
                     completion_ids = [None] * len(all_prompts_text)
 
@@ -1179,17 +1182,17 @@ class GRPOTrainer(Trainer):
                     self.accelerator.process_index * n_local_prompts,
                     (self.accelerator.process_index + 1) * n_local_prompts,
                 )
-                completion_ids = completion_ids[-n_global_prompts:][process_slice]
+                completion_ids = completion_ids_all[-n_global_prompts:][process_slice]
                 # Add saving prompts which are prepended to the completions
                 if self.tool_use:
                     # Create dict mapping from prompt idx to all saving idx for it
                     saving_idx_map = {i: [] for i in range(n_global_prompts)}
                     idx = 0
-                    for i, c in enumerate(completion_ids_all[-n_global_prompts:]):
+                    for i, c in enumerate(completion_ids_all[-n_global_prompts:]): # Iterate through final completions
                         # Check if continuation has saving
                         if self.processing_class.convert_tokens_to_ids(self.args.saving_tokens[0]) in c:
                             # Check how many savings
-                            saving_idx_map[i].append(idx) # first one has no saving token but the tool call
+                            saving_idx_map[i].append(idx) # first one has no saving token but the tool call e.g. <tool_call>\n{"name": "saving", "arguments": {...
                             idx += 1
                             while self.processing_class.convert_tokens_to_ids(self.args.saving_tokens[0]) in completion_ids_all[idx]:
                                 saving_idx_map[i].append(idx)
@@ -1320,7 +1323,7 @@ class GRPOTrainer(Trainer):
         else:
             completions = completions_text
 
-        rewards_per_func = torch.zeros(len(prompts_text), len(self.reward_funcs), device=device)
+        rewards_per_func = torch.zeros(len(completions), len(self.reward_funcs), device=device)
         for i, (reward_func, reward_processing_class, reward_func_name) in enumerate(
             zip(self.reward_funcs, self.reward_processing_classes, self.reward_func_names)
         ):
@@ -1353,7 +1356,7 @@ class GRPOTrainer(Trainer):
                             completions=completions[-n_local_prompts:], **reward_kwargs
                         )
                         output_reward_func = [
-                            output_reward_func[local_i] for i, local_i in enumerate(pidx) for _ in saving_idx_map[i]
+                            output_reward_func[local_i] for local_i, i in enumerate(pidx) for _ in saving_idx_map[i]
                         ] + output_reward_func
                     else:
                         output_reward_func = reward_func(prompts=prompts, completions=completions, **reward_kwargs)

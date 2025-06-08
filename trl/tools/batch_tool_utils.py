@@ -231,18 +231,17 @@ def generate_with_tool_batch(
                     exec_out = ""
                     new_code = detect["tool_argument"]['code']
 
-                python_start_idx = detect["tool_start_idx"]
                 new_python_code = json.dumps(
                     {
                         "name": "python",
                         "arguments": {
                             "code": new_code
                         }
-                    }
+                    }, ensure_ascii=False
                 )
 
                 new_text = (
-                    contexts[global_i][:prompt_idx + python_start_idx]
+                    contexts[global_i][:detect["tool_start_idx"]]
                     + f"{args.tool_tokens[0]}\n" + new_python_code + f"\n{args.tool_tokens[1]}\n"
                     f"{args.result_tokens[0]}\n" + exec_out + f"\n{args.result_tokens[1]}\n"
                 )

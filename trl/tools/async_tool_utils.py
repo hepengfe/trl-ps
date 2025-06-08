@@ -69,8 +69,6 @@ def _detect_tool_use(context: str, prompt_idx: int) -> dict:
 
     generated = context[prompt_idx:]
     
-    generated = context[prompt_idx:]
-    
     # Find the last occurrence of tool calling
     start = generated.rfind(start_tag)
     # no tool call detected
@@ -92,11 +90,8 @@ def _detect_tool_use(context: str, prompt_idx: int) -> dict:
     else:
         tool_call_raw = generated[start + len(start_tag):end].strip()
     
+    start += prompt_idx # Make it global i.e. full context index
     try:            
-        tool_call_raw = tool_call_raw.encode('utf-8').decode('unicode_escape').strip()
-        # tool_call_raw = re.sub(r'(?<!\\)\n', r'\\n', tool_call_raw)
-        # tool_call_raw = tool_call_raw.replace('“', '\\"').replace('”', '\\"')
-        
         parsed = json.loads(tool_call_raw)
         result = {
             "tool_use": True,
@@ -108,12 +103,10 @@ def _detect_tool_use(context: str, prompt_idx: int) -> dict:
         return result
     except Exception as e: # json.JSONDecodeError or UnicodeDecodeError
         print(f"Failed to parse {tool_call_raw} due to {e}")
-    
+
     # if json parsing fails, fall back to regex
-    code_match = re.search(r'"code"\s*:\s*"(.+?)"\s*}', tool_call_raw, re.DOTALL)
-    query_match = re.search(r'"query"\s*:\s*"(.+?)"\s*}', tool_call_raw, re.DOTALL)
     print("Using regex to capture tool call.")
-    if code_match:
+    if (code_match := re.search(r'"code"\s*:\s*"(.+?)"\s*}', tool_call_raw, re.DOTALL)):
         result = {
             "tool_use": True,
             "tool_type": "python",
@@ -121,11 +114,19 @@ def _detect_tool_use(context: str, prompt_idx: int) -> dict:
             "error_tool_use": False,
             "tool_start_idx": start,
         }
-    elif query_match:
+    elif (query_match := re.search(r'"query"\s*:\s*"(.+?)"\s*}', tool_call_raw, re.DOTALL)):
         result = {
             "tool_use": True,
             "tool_type": "retrieval",
             "tool_argument": {"query": query_match.group(1)},
+            "error_tool_use": False,
+            "tool_start_idx": start,
+        }
+    elif (saving_match := re.search(r'"summary"\s*:\s*"(.+?)"\s*}', tool_call_raw, re.DOTALL)):
+        result = {
+            "tool_use": True,
+            "tool_type": "saving",
+            "tool_argument": {"summary": saving_match.group(1)},
             "error_tool_use": False,
             "tool_start_idx": start,
         }
@@ -137,7 +138,6 @@ def _detect_tool_use(context: str, prompt_idx: int) -> dict:
             "error_tool_use": True,
             "tool_start_idx": start,
         }
-    # print(result)
     return result
 
 def _generate_with_tool(
