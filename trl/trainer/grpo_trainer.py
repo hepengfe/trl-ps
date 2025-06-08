@@ -1157,8 +1157,10 @@ class GRPOTrainer(Trainer):
                             self._metrics[mode]["tools/num_python"].append(tool_stats["num_python"])
                             self._metrics[mode]["tools/num_retrieval"].append(tool_stats["num_retrieval"])
                             self._metrics[mode]["tools/num_saving"].append(tool_stats["num_saving"])
-                            self._metrics[mode]["tools/num_error"].append(tool_stats["num_error"])
-
+                            self._metrics[mode]["tools/num_tool_detect_error"].append(tool_stats["num_tool_detect_error"])
+                            self._metrics[mode]["tools/num_python_exec_error"].append(tool_stats["num_python_exec_error"])
+                            self._metrics[mode]["tools/num_retriever_exec_error"].append(tool_stats["num_retriever_exec_error"])
+                            self._metrics[mode]["tools/num_saving_exec_error"].append(tool_stats["num_saving_exec_error"])
                             print("Tool stats", tool_stats)
                 else:
                     completion_ids = [None] * len(all_prompts_text)

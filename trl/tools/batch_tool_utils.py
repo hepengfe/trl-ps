@@ -145,7 +145,10 @@ def generate_with_tool_batch(
             "num_python": 0,
             "num_retrieval": 0,
             "num_saving": 0,
-            "num_error": 0,
+            "num_tool_detect_error": 0,
+            "num_python_exec_error": 0,
+            "num_retriever_exec_error": 0,
+            "num_saving_exec_error": 0,
         }
         for _ in range(N)
     ]
@@ -195,13 +198,13 @@ def generate_with_tool_batch(
             # 3. Termination: error tool call OR no tool call OR ran out of budget
             # ------------------------------------------------------------------
             if not detect["tool_use"]:
-                stats[global_i]["num_error"] += 1
                 # Token exceeded limit / finished naturally via eos
                 if (tokens_left[global_i] <= 0) or (last_tok == args.eos_token):
                     done[global_i] = True
                 # Else prompt may have stopped due to min tok limit/unknown issue & needs more generation
                 continue
             elif detect["error_tool_use"]:
+                stats[global_i]["num_tool_detect_error"] += 1
                 print(f"[{global_i}] malformed tool call – skipping tool use.")
                 add = f"\n{args.result_tokens[0]}\n{args.result_tokens[1]}\n"
                 n_toks = len(tokenizer(add).input_ids)
@@ -219,6 +222,7 @@ def generate_with_tool_batch(
             # ------------------------------------------------------------------
             tool_type = detect["tool_type"]
             tool_start = time.time()
+            exec_error = False
 
             if tool_type == "python":
                 stats[global_i]["num_python"] += 1
@@ -230,6 +234,7 @@ def generate_with_tool_batch(
                     print(e)
                     exec_out = ""
                     new_code = detect["tool_argument"]['code']
+                    stats[global_i]["num_tool_exec_error"] += 1
 
                 new_python_code = json.dumps(
                     {
@@ -263,11 +268,12 @@ def generate_with_tool_batch(
                 try:
                     print(detect["tool_argument"])
                     result = google_retriever(**detect["tool_argument"])
-                    result_text = result.response if result else ""
+                    result_text = result.response
                 except Exception as e:
                     print(f"[ERROR] Retrieval failed.")
                     print(e)
                     result_text = ""
+                    stats[global_i]["num_retriever_exec_error"] += 1
 
                 new_text = f"{args.result_tokens[0]}\n" + result_text + f"\n{args.result_tokens[1]}\n"
                 toks = tokenizer(new_text).input_ids
@@ -289,6 +295,7 @@ def generate_with_tool_batch(
                 except Exception as e:
                     print(e)
                     summary = ""
+                    stats[global_i]["num_saving_exec_error"] += 1
 
                 # bookkeep the old thinking & summary
                 completions_to_return.append(contexts[global_i][prompts_len[global_i]:])
