@@ -619,6 +619,7 @@ class GRPOTrainer(Trainer):
             "completion": deque(maxlen=maxlen),
             "rewards": defaultdict(lambda: deque(maxlen=maxlen)),
             "advantages": deque(maxlen=maxlen),
+            "answer": deque(maxlen=maxlen),
         }
 
         # Ensure each process receives a unique seed to prevent duplicate completions when generating with
@@ -1285,6 +1286,12 @@ class GRPOTrainer(Trainer):
         sequence_indices = torch.arange(is_eos.size(1), device=device).expand(is_eos.size(0), -1)
         completion_mask = (sequence_indices <= eos_idx.unsqueeze(1)).int()
 
+        # log completion lengths, mean, min, max here to avoid truncation changing them
+        agg_completion_lengths = self.accelerator.gather(completion_lengths)
+        self._metrics[mode]["completions/mean_length"].append(agg_completion_lengths.float().mean().item())
+        self._metrics[mode]["completions/min_length"].append(agg_completion_lengths.float().min().item())
+        self._metrics[mode]["completions/max_length"].append(agg_completion_lengths.float().max().item())
+
         # Convert tensor to a list of lists of token IDs. This will be passed to the reward function, avoiding the need
         # to re-tokenize completions if the reward is computed from tokens.
         completion_ids_list = [
@@ -1301,6 +1308,21 @@ class GRPOTrainer(Trainer):
 
         # Concatenate prompt_mask with completion_mask for logit computation
         attention_mask = torch.cat([prompt_mask, completion_mask], dim=1)  # (B, P+C)
+
+        if mode == "train":
+            self.state.num_input_tokens_seen += self.accelerator.gather(attention_mask.sum()).sum().item()
+        self._metrics[mode]["num_tokens"] = [self.state.num_input_tokens_seen]
+
+        # Identify sequences that terminated with EOS and log their lengths
+        agg_terminated_with_eos = self.accelerator.gather(is_eos.any(dim=1))
+        term_completion_lengths = agg_completion_lengths[agg_terminated_with_eos]
+        clipped_completions_ratio = 1 - len(term_completion_lengths) / len(agg_completion_lengths)
+        self._metrics[mode]["completions/clipped_ratio"].append(clipped_completions_ratio)
+        if len(term_completion_lengths) == 0:  # edge case where no terminated sequences are found
+            term_completion_lengths = torch.zeros(1, device=device)
+        self._metrics[mode]["completions/mean_terminated_length"].append(term_completion_lengths.float().mean().item())
+        self._metrics[mode]["completions/min_terminated_length"].append(term_completion_lengths.float().min().item())
+        self._metrics[mode]["completions/max_terminated_length"].append(term_completion_lengths.float().max().item())
 
         logits_to_keep = completion_ids.size(1)  # we only need to compute the logits for the completion tokens
         batch_size = self.args.per_device_train_batch_size if mode == "train" else self.args.per_device_eval_batch_size
@@ -1459,28 +1481,6 @@ class GRPOTrainer(Trainer):
             advantages = advantages[process_slice]
 
 
-        # Log the metrics
-        if mode == "train":
-            self.state.num_input_tokens_seen += self.accelerator.gather(attention_mask.sum()).sum().item()
-        self._metrics[mode]["num_tokens"] = [self.state.num_input_tokens_seen]
-
-        # Log completion lengths, mean, min, max
-        agg_completion_lengths = self.accelerator.gather(completion_lengths)
-        self._metrics[mode]["completions/mean_length"].append(agg_completion_lengths.float().mean().item())
-        self._metrics[mode]["completions/min_length"].append(agg_completion_lengths.float().min().item())
-        self._metrics[mode]["completions/max_length"].append(agg_completion_lengths.float().max().item())
-
-        # Identify sequences that terminated with EOS and log their lengths
-        agg_terminated_with_eos = self.accelerator.gather(is_eos.any(dim=1))
-        term_completion_lengths = agg_completion_lengths[agg_terminated_with_eos]
-        clipped_completions_ratio = 1 - len(term_completion_lengths) / len(agg_completion_lengths)
-        self._metrics[mode]["completions/clipped_ratio"].append(clipped_completions_ratio)
-        if len(term_completion_lengths) == 0:  # edge case where no terminated sequences are found
-            term_completion_lengths = torch.zeros(1, device=device)
-        self._metrics[mode]["completions/mean_terminated_length"].append(term_completion_lengths.float().mean().item())
-        self._metrics[mode]["completions/min_terminated_length"].append(term_completion_lengths.float().min().item())
-        self._metrics[mode]["completions/max_terminated_length"].append(term_completion_lengths.float().max().item())
-
         # Calculate mean reward per function, but only for samples where the function was applied (non-NaN values)
         for i, reward_func_name in enumerate(self.reward_func_names):
             if self.tool_use:
@@ -1499,6 +1499,8 @@ class GRPOTrainer(Trainer):
         # Log prompt and completion texts
         self._textual_logs["prompt"].extend(gather_object(prompts_text))
         self._textual_logs["completion"].extend(gather_object(completions_text))
+        if "answer" in inputs[0]:
+            self._textual_logs["answer"].extend(gather_object([x["answer"] for x in inputs]))
         for i, name in enumerate(self.reward_func_names):
             self._textual_logs["rewards"][name].extend(rewards_per_func[:, i].tolist())
         self._textual_logs["advantages"].extend(all_process_advantages.tolist())
@@ -1737,10 +1739,15 @@ class GRPOTrainer(Trainer):
                     **self._textual_logs["rewards"],
                     "advantage": self._textual_logs["advantages"],
                 }
+                if "answer" in self._textual_logs:
+                    table["answer"] = self._textual_logs["answer"]
                 df = pd.DataFrame(table)
                 if self.wandb_log_unique_prompts:
                     df = df.drop_duplicates(subset=["prompt"])
-                wandb.log({"completions": wandb.Table(dataframe=df)})
+                # wandb.log({"completions": wandb.Table(dataframe=df)})
+                if len(df) > 4: # Sample 3 from head and 1 from tail
+                    df = pd.concat([df.head(3), df.tail(1)])
+                wandb.log({f"completions/{str(self.state.global_step)}": wandb.Table(dataframe=df)})
 
     def create_model_card(
         self,
