@@ -237,7 +237,7 @@ def generate_with_tool_batch(
                         "arguments": {
                             "code": new_code
                         }
-                    }
+                    }, ensure_ascii=False
                 )
 
                 new_text = (

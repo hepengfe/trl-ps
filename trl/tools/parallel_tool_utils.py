@@ -135,7 +135,7 @@ def _execute_tool_job(args):
             new_python_code = json.dumps({
                 "name": "python",
                 "arguments": {"code": new_code}
-            })
+            }, ensure_ascii=False)
             
             python_start_idx = detect["tool_start_idx"]
             context = (
