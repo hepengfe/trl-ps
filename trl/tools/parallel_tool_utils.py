@@ -256,13 +256,10 @@ def generate_with_tool_batch(
                 completions_to_return.append(contexts[global_i][prompts_len[global_i]:] + f"\n{args.eos_token}\n")
                 prompts_to_return.append(contexts[global_i][:prompts_len[global_i]])
 
-                contexts[global_i] = (
-                    contexts[global_i][:prompts_len[global_i]]
-                    + f"\n{args.saving_tokens[0]}\n{summary}\n{args.saving_tokens[1]}\n"
-                )
-                toks = len(tokenizer(f"\n{args.saving_tokens[0]}\n" + summary + f"\n{args.saving_tokens[1]}\n").input_ids)
-                tokens_left[global_i] = args.max_completion_length - toks
-
+                #  f"{args.saving_tokens[0]}\n{summary}\n{args.saving_tokens[1]}\n"
+                add = f"{args.saving_tokens[0]}\n{summary}\n{args.saving_tokens[1]}\n{args.thinking_tokens[0]}\n"
+                contexts[global_i] = contexts[global_i][:prompts_len[global_i]] + add
+                tokens_left[global_i] = args.max_completion_length - len(tokenizer(add).input_ids)
             else:
                 tool_jobs.append((global_i, deepcopy(detect), contexts[global_i], args, tokenizer))
 

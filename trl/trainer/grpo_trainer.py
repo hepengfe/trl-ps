@@ -587,11 +587,21 @@ class GRPOTrainer(Trainer):
         self.num_completions_to_print = args.num_completions_to_print
         # maxlen is set to the total number of forward passes per step. This value of `maxlen` ensures we log only the
         # final optimization step.
-        maxlen = self.accelerator.num_processes * args.per_device_train_batch_size * args.gradient_accumulation_steps
+        # TODO: Change in case of saving (not super high prio as not all text is logged anyways)
+        if self.tool_use:
+            # maxlen = self.accelerator.num_processes * args.per_device_train_batch_size * args.gradient_accumulation_steps
+            maxlen = args.per_device_train_batch_size * args.gradient_accumulation_steps            
+        else:
+            maxlen = self.accelerator.num_processes * args.per_device_train_batch_size * args.steps_per_generation
+            
         self._textual_logs = {
             "prompt": deque(maxlen=maxlen),
             "completion": deque(maxlen=maxlen),
             "rewards": defaultdict(lambda: deque(maxlen=maxlen)),
+            "advantages": deque(maxlen=maxlen),
+            "solution": deque(maxlen=maxlen),
+            "domain": deque(maxlen=maxlen),
+            "source": deque(maxlen=maxlen),
         }
 
         # Check if the effective batch size can be divided by the number of generations
@@ -1167,6 +1177,7 @@ class GRPOTrainer(Trainer):
                 completion_ids = completion_ids[-n_global_prompts:][process_slice]
                 # Add saving prompts which are prepended to the completions
                 if self.tool_use:
+                    # TODO: STH MIGHT BE GOING WRONG HERE CUZ PROMPTS AND COMPLETIONS IN WANDB IN MULTINODE DO NOT MATCH
                     # Create dict mapping from prompt idx to all saving idx for it
                     saving_idx_map = {i: [] for i in range(n_global_prompts)}
                     idx = 0
@@ -1191,6 +1202,9 @@ class GRPOTrainer(Trainer):
 
                     prompt_mask_all = broadcast_object_list(prompt_mask, from_process=0)
                     prompt_mask = [prompt_mask_all[j] for i in pidx for j in saving_idx_map[i]] + prompt_mask_all[-n_global_prompts:][process_slice]
+                    
+                    # Recreate prompts_text for logging later in case they have changed due to saving
+                    prompts_text = self.processing_class.batch_decode(prompt_ids, skip_special_tokens=False)
 
             # Generate completions using colocated vLLM instances: each device holds vLLM copy and work on their own batch of prompts
             elif self.vllm_mode == "colocate":
@@ -1380,7 +1394,8 @@ class GRPOTrainer(Trainer):
 
         # Gather the reward per function: this part is crucial, because the rewards are normalized per group and the
         # completions may be distributed across processes
-        rewards_per_func = gather(rewards_per_func)
+        rewards_per_func_pre = rewards_per_func.clone()  # keep the pre-gathered rewards for logging
+        rewards_per_func = gather(rewards_per_func) # TODO: Will this mess up the savings being at the beginning?
 
         # Apply weights to each reward function's output and sum
         rewards = (rewards_per_func * self.reward_weights.to(device).unsqueeze(0)).nansum(dim=1)
@@ -1465,10 +1480,30 @@ class GRPOTrainer(Trainer):
         self._metrics[mode]["reward_std"].append(std_grouped_rewards.mean().item())
 
         # Log prompt and completion texts
-        self._textual_logs["prompt"].extend(gather_object(prompts_text))
-        self._textual_logs["completion"].extend(gather_object(completions_text))
+        self._textual_logs["prompt"].extend(prompts_text)
+        self._textual_logs["completion"].extend(completions_text)
+        if "solution" in inputs[0]:
+            if self.accelerator.is_main_process:
+                import pdb; pdb.set_trace()
+            self.accelerator.wait_for_everyone()
+            sols = [
+                inputs[local_i]['solution'] for local_i, i in enumerate(pidx) for _ in saving_idx_map[i]
+            ] + [x["solution"] for x in inputs]
+            self._textual_logs["solution"].extend(sols)
+        if "domain" in inputs[0]:
+            domains = [
+                inputs[local_i]['domain'] for local_i, i in enumerate(pidx) for _ in saving_idx_map[i]
+            ] + [x["domain"] for x in inputs]
+            self._textual_logs["domain"].extend(domains)
+        if "source" in inputs[0]:
+            sources = [
+                inputs[local_i]['source'] for local_i, i in enumerate(pidx) for _ in saving_idx_map[i]
+            ] + [x["source"] for x in inputs]
+            self._textual_logs["source"].extend(sources)
         for i, name in enumerate(self.reward_func_names):
-            self._textual_logs["rewards"][name].extend(rewards_per_func[:, i].tolist())
+            self._textual_logs["rewards"][name].extend(rewards_per_func_pre[:, i].tolist())
+        # self._textual_logs["advantages"].extend(all_process_advantages.tolist())
+        self._textual_logs["advantages"].extend(advantages.tolist())
 
         return {
             "prompt_ids": prompt_ids,
@@ -1697,6 +1732,12 @@ class GRPOTrainer(Trainer):
                     "completion": self._textual_logs["completion"],
                     **self._textual_logs["rewards"],
                 }
+                if self._textual_logs.get("solution"):
+                    table["solution"] = self._textual_logs["solution"]
+                if self._textual_logs.get("domain"):
+                    table["domain"] = self._textual_logs["domain"]
+                if self._textual_logs.get("source"):
+                    table["source"] = self._textual_logs["source"]
                 df = pd.DataFrame(table)
                 if self.wandb_log_unique_prompts:
                     df = df.drop_duplicates(subset=["prompt"])
