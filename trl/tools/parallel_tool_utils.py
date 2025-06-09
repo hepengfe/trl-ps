@@ -115,6 +115,7 @@ def _make_tool_inference_requests_batch(
     
 def _execute_tool_job(args):
     """Worker for executing tool calls (Python or retrieval)."""
+    exec_error = False
     global_i, detect, context, args_, tokenizer = args
     try:
         tool_type = detect["tool_type"]
@@ -131,11 +132,12 @@ def _execute_tool_job(args):
                 print(f"[ERROR] Python execution failed for idx={global_i}:\n{code}\n{e}")
                 exec_out = ""
                 new_code = code
+                exec_error = True
 
             new_python_code = json.dumps({
                 "name": "python",
                 "arguments": {"code": new_code}
-            })
+            }, ensure_ascii=False)
             
             python_start_idx = detect["tool_start_idx"]
             context = (
@@ -144,27 +146,30 @@ def _execute_tool_job(args):
                 f"{args_.result_tokens[0]}\n" + exec_out + f"\n{args_.result_tokens[1]}\n"
             )
             print(f"Python Interpreter Finished. Result: {exec_out[:30]}")
-            return global_i, tool_type, context
+            return global_i, tool_type, context, exec_error
 
         elif tool_type in ("retrieval", "retrieve"):
             print("Calling Web Retriever")
             try:
                 result = google_retriever(**detect["tool_argument"])
                 result_text = result.response if result else ""
+                if not result:
+                    exec_error = True
             except Exception as e:
                 print(f"[ERROR] Retrieval failed for idx={global_i}: {e}")
                 result_text = ""
+                exec_error = True
 
             context = (
                 context +
                 f"{args_.result_tokens[0]}\n" + result_text + f"\n{args_.result_tokens[1]}\n"
             )
             print(f"Web Retriever Finished. Result: {result_text[:30]}")
-            return global_i, tool_type, context
+            return global_i, tool_type, context, exec_error
 
     except Exception as e:
         print(f"[ERROR] Tool job failed for idx={global_i}: {e}")
-        return global_i, None, context
+        return global_i, None, context, True
 
 
 ################################################################################
@@ -201,7 +206,17 @@ def generate_with_tool_batch(
     prompts_to_return = []
     tokens_left = [args.max_completion_length] * N
     done = [False] * N
-    stats = [{"generated_tokens": 0, "num_python": 0, "num_retrieval": 0, "num_saving": 0} for _ in range(N)]
+    stats = [
+        {"generated_tokens": 0, 
+        "num_python": 0, 
+        "num_retrieval": 0, 
+        "num_saving": 0, 
+        "num_tool_detect_error": 0, 
+        "num_python_exec_error": 0,
+        "num_retriever_exec_error": 0,
+        "num_saving_exec_error": 0,
+        } for _ in range(N)
+    ]
 
     step = 0
     while not all(done) and step < 20:
@@ -224,25 +239,25 @@ def generate_with_tool_batch(
         for local_i, global_i in enumerate(active_idx):
             comp_ids = comp_ids_list[local_i]
             comp_text = comp_text_list[local_i]
+            prompt_idx = len(contexts[global_i])
             contexts[global_i] += comp_text
             stats[global_i]["generated_tokens"] += len(comp_ids)
             tokens_left[global_i] -= len(comp_ids)
 
-            detect = _detect_tool_use(
-                contexts[global_i],
-                prompt_idx=len(contexts[global_i]) - len(comp_text),
-            )
+            detect = _detect_tool_use(contexts[global_i], prompt_idx=prompt_idx)
             if detect["error_tool_use"]:
+                stats[global_i]["num_tool_detect_error"] += 1
                 print(f"[{global_i}] malformed tool call – skipping tool use.")
                 contexts[global_i] += f"\n{args.result_tokens[0]}\n{args.result_tokens[1]}\n"
                 continue
-            
+
             if not detect["tool_use"]:
-                if tokens_left[global_i] <= 0 or "Final Answer" in contexts[global_i]:
+                if (tokenizer.decode(comp_ids[-1]) == args.eos_token) and not(contexts[global_i].endswith(args.eos_token)):
+                    contexts[global_i] += args.eos_token
                     done[global_i] = True
-                    continue
-                else:
-                    continue
+                elif tokens_left[global_i] <= 0:
+                    done[global_i] = True
+                continue
 
             tool_type = detect["tool_type"]
             if tool_type == "saving":
@@ -251,9 +266,10 @@ def generate_with_tool_batch(
                     summary = detect["tool_argument"]["summary"]
                 except:
                     summary = ""
+                    stats[global_i]["num_saving_exec_error"] += 1
 
-                contexts_to_return.append(contexts[global_i] + f"\n{args.eos_token}\n")
-                completions_to_return.append(contexts[global_i][prompts_len[global_i]:] + f"\n{args.eos_token}\n")
+                contexts_to_return.append(contexts[global_i] + args.eos_token)
+                completions_to_return.append(contexts[global_i][prompts_len[global_i]:] + args.eos_token)
                 prompts_to_return.append(contexts[global_i][:prompts_len[global_i]])
 
                 #  f"{args.saving_tokens[0]}\n{summary}\n{args.saving_tokens[1]}\n"
@@ -268,18 +284,26 @@ def generate_with_tool_batch(
             with ThreadPoolExecutor(max_workers=min(len(tool_jobs), os.cpu_count())) as executor:
                 results = list(executor.map(_execute_tool_job, tool_jobs))
 
-
-            for global_i, tool_type, updated_context in results:
-                # TODO: manage token counting
+            for global_i, tool_type, updated_context, exec_error in results:
+                toks = tokenizer(updated_context).input_ids
+                n_toks = len(toks)
+                if n_toks > args.max_completion_length:
+                    done[global_i] = True
+                    updated_context = tokenizer.decode(toks[:args.max_completion_length])
+                    n_toks = args.max_completion_length
+                tokens_left[global_i] = args.max_completion_length - n_toks
                 contexts[global_i] = updated_context
                 if tool_type == "python":
                     stats[global_i]["num_python"] += 1
+                    if exec_error:
+                        stats[global_i]["num_python_exec_error"] += 1
                 elif tool_type in ("retrieval", "retrieve"):
                     stats[global_i]["num_retrieval"] += 1
+                    if exec_error:
+                        stats[global_i]["num_retriever_exec_error"] += 1
         
             tool_duration = time.time() - tool_start
             print(f"[Time] {tool_duration:.2f} seconds for {len(tool_jobs)} parallel tool calls. Avg {tool_duration / len(tool_jobs):.2f} seconds.")
-
 
     contexts_to_return.extend(contexts)
     prompts_to_return.extend(prompts)

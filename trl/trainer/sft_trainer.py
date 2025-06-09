@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import contextlib
 import dataclasses
 import os
 import warnings
@@ -21,7 +22,6 @@ from typing import Any, Callable, Optional, Union
 
 import torch
 import torch.nn as nn
-import transformers
 from accelerate import PartialState
 from datasets import Dataset, IterableDataset
 from packaging import version
@@ -51,6 +51,7 @@ from ..data_utils import (
     pack_dataset,
     truncate_dataset,
 )
+from ..models import get_act_offloading_ctx_manager
 from .sft_config import SFTConfig
 from .utils import (
     ConstantLengthDataset,
@@ -369,17 +370,7 @@ class SFTTrainer(Trainer):
         # - FSDP setup
         # - Distributed training setup
         # - Optimizer and scheduler creation
-        # Some arguments are only available for transformers>=4.47.0. Can be removed when the min version is bumped.
-        super_init_kwargs = {}
-        if version.parse(transformers.__version__) >= version.parse("4.47.0.dev0"):
-            super_init_kwargs["optimizer_cls_and_kwargs"] = optimizer_cls_and_kwargs
-        else:
-            if optimizer_cls_and_kwargs is not None:
-                warnings.warn(
-                    "The `optimizer_cls_and_kwargs` argument is only available for `transformers>=4.47.0`. "
-                    "The default optimizer will be used. "
-                    "Remove the `optimizer_cls_and_kwargs` or upgrade to `transformers>=4.47.0`."
-                )
+
         super().__init__(
             model=model,
             args=args,
@@ -391,9 +382,15 @@ class SFTTrainer(Trainer):
             compute_metrics=compute_metrics,
             callbacks=callbacks,
             optimizers=optimizers,
+            optimizer_cls_and_kwargs=optimizer_cls_and_kwargs,
             preprocess_logits_for_metrics=preprocess_logits_for_metrics,
-            **super_init_kwargs,
         )
+
+        # Initialize activation offloading context
+        if self.args.activation_offloading:
+            self.maybe_activation_offload_context = get_act_offloading_ctx_manager(model=self.model)
+        else:
+            self.maybe_activation_offload_context = contextlib.nullcontext()
 
         # Add tags for models that have been loaded with the correct transformers version
         if hasattr(self.model, "add_model_tags"):
@@ -652,7 +649,7 @@ class SFTTrainer(Trainer):
                 if isinstance(dataset, Dataset):  # `IterableDataset.map` does not support `desc`
                     map_kwargs["desc"] = f"Packing {dataset_name} dataset"
                 dataset = dataset.select_columns("input_ids")
-                dataset = pack_dataset(dataset, args.max_length, map_kwargs)
+                dataset = pack_dataset(dataset, args.max_length, args.packing_strategy, map_kwargs)
             elif args.max_length is not None:
                 if isinstance(dataset, Dataset):  # `IterableDataset.map` does not support `desc`
                     map_kwargs["desc"] = f"Truncating {dataset_name} dataset"
@@ -719,6 +716,11 @@ class SFTTrainer(Trainer):
 
         return (loss, outputs) if return_outputs else loss
 
+    # Override training step to add activation offloading context.
+    def training_step(self, *args, **kwargs):
+        with self.maybe_activation_offload_context:
+            return super().training_step(*args, **kwargs)
+
     def log(self, logs: dict[str, float], start_time: Optional[float] = None) -> None:
         mode = "train" if self.model.training else "eval"
         metrics = {key: sum(val) / len(val) for key, val in self._metrics[mode].items()}  # average the metrics
@@ -729,10 +731,7 @@ class SFTTrainer(Trainer):
             metrics = {f"eval_{key}": val for key, val in metrics.items()}
 
         logs = {**logs, **metrics}
-        if version.parse(transformers.__version__) >= version.parse("4.47.0.dev0"):
-            super().log(logs, start_time)
-        else:  # transformers<=4.46
-            super().log(logs)
+        super().log(logs, start_time)
         self._metrics[mode].clear()
 
     def create_model_card(
