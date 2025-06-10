@@ -625,6 +625,8 @@ class GRPOTrainer(Trainer):
             "source": deque(maxlen=maxlen),
         }
 
+        self.maxlen = maxlen
+
         # Ensure each process receives a unique seed to prevent duplicate completions when generating with
         # transformers if num_generations exceeds per_device_train_batch_size. We could skip it if we use vLLM, but
         # it's safer to set it in all cases.
@@ -1497,8 +1499,9 @@ class GRPOTrainer(Trainer):
         self._metrics[mode]["frac_reward_zero_std"].append(is_std_zero.float().mean().item())
 
         # Log prompt and completion texts; No need to gather across processes as we log only very few
-        self._textual_logs["prompt"].extend(prompts_text)
-        self._textual_logs["completion"].extend(completions_text)
+        # :maxlen as it may be longer due to saving in which case we want the saving ones at the start logged
+        self._textual_logs["prompt"].extend(prompts_text[:self.maxlen])
+        self._textual_logs["completion"].extend(completions_text[:self.maxlen])
         if "solution" in inputs[0]:
             if self.tool_use:
                 sols = [
@@ -1506,7 +1509,7 @@ class GRPOTrainer(Trainer):
                 ] + [x["solution"] for x in inputs]
             else:
                 sols = [x["solution"] for x in inputs]
-            self._textual_logs["solution"].extend(sols)
+            self._textual_logs["solution"].extend(sols[:self.maxlen])
         if "domain" in inputs[0]:
             if self.tool_use:
                 domains = [
@@ -1514,7 +1517,7 @@ class GRPOTrainer(Trainer):
                 ] + [x["domain"] for x in inputs]
             else:
                 domains = [x["domain"] for x in inputs]
-            self._textual_logs["domain"].extend(domains)
+            self._textual_logs["domain"].extend(domains[:self.maxlen])
         if "source" in inputs[0]:
             if self.tool_use:
                 sources = [
@@ -1522,14 +1525,10 @@ class GRPOTrainer(Trainer):
                 ] + [x["source"] for x in inputs]
             else:
                 sources = [x["source"] for x in inputs]
-            self._textual_logs["source"].extend(sources)
+            self._textual_logs["source"].extend(sources[:self.maxlen])
         for i, name in enumerate(self.reward_func_names):
-            self._textual_logs["rewards"][name].extend(rewards_per_func[:, i].tolist())
-        self._textual_logs["advantages"].extend(advantages.tolist())
-
-        if self.accelerator.is_main_process:
-            import pdb; pdb.set_trace()
-        self.accelerator.wait_for_everyone()
+            self._textual_logs["rewards"][name].extend(rewards_per_func[:, i].tolist()[:self.maxlen])
+        self._textual_logs["advantages"].extend(advantages.tolist()[:self.maxlen])
 
         return {
             "prompt_ids": prompt_ids,
