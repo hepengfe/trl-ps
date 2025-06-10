@@ -86,7 +86,7 @@ def _make_tool_inference_requests_batch(
 
         j = resp.json()
         return j["completion_ids"], j["completion_text"]  # type: ignore[return-value]
-    
+
     elif args.vllm_mode == "colocate":
         assert llm is not None, "Require llm for tool inference"
         sampling_params = SamplingParams(

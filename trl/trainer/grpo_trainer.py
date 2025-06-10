@@ -1185,7 +1185,6 @@ class GRPOTrainer(Trainer):
                 completion_ids = completion_ids_all[-n_global_prompts:][process_slice]
                 # Add saving prompts which are prepended to the completions
                 if self.tool_use:
-                    # TODO: STH MIGHT BE GOING WRONG HERE CUZ PROMPTS AND COMPLETIONS IN WANDB IN MULTINODE DO NOT MATCH
                     # Create dict mapping from prompt idx to all saving idx for it
                     saving_idx_map = {i: [] for i in range(n_global_prompts)}
                     idx = 0
@@ -1431,41 +1430,35 @@ class GRPOTrainer(Trainer):
                 "Please ensure that at least one reward function returns a valid reward."
             )
 
-        # Gather the reward per function: this part is crucial, because the rewards are normalized per group and the
-        # completions may be distributed across processes
-        rewards_per_func_pre = rewards_per_func.clone()  # keep the pre-gathered rewards for logging
-        rewards_per_func = gather(rewards_per_func) # TODO: Will this mess up the savings being at the beginning?
-
-        # Apply weights to each reward function's output and sum
-        rewards = (rewards_per_func * self.reward_weights.to(device).unsqueeze(0)).nansum(dim=1)
-
 
         if self.tool_use:
-            # Only compute group stats etc over non-saving prompts
-            mean_grouped_rewards = rewards[-n_global_prompts:].view(-1, self.num_generations).mean(dim=1)
-            std_grouped_rewards = rewards[-n_global_prompts:].view(-1, self.num_generations).std(dim=1)
+            # Only gather non-saving rewards
+            rewards_per_func_global = gather(rewards_per_func[-n_local_prompts:])
+            rewards = (rewards_per_func_global * self.reward_weights.to(device).unsqueeze(0)).nansum(dim=1)
+
+            mean_grouped_rewards = rewards.view(-1, self.num_generations).mean(dim=1)
+            std_grouped_rewards = rewards.view(-1, self.num_generations).std(dim=1)
 
             mean_grouped_rewards = mean_grouped_rewards.repeat_interleave(self.num_generations, dim=0)
             std_grouped_rewards = std_grouped_rewards.repeat_interleave(self.num_generations, dim=0)
             is_std_zero = torch.isclose(std_grouped_rewards, torch.zeros_like(std_grouped_rewards))
-            # Compute advantages
-            for k, vs in saving_idx_map.items():
-                for v in vs:
-                    rewards[v] -= mean_grouped_rewards[k]
-                    if self.scale_rewards:
-                        rewards[v] /= (std_grouped_rewards[k] + 1e-4)
-                rewards[-n_global_prompts:][k] -= mean_grouped_rewards[k]
-                if self.scale_rewards:
-                    rewards[-n_global_prompts:][k] /= (std_grouped_rewards[k] + 1e-4)
 
-            # Select local bits
-            idx = [j for i in pidx for j in saving_idx_map[i]]
+            advantages = rewards - mean_grouped_rewards
+            if self.scale_rewards:
+                advantages = advantages / (std_grouped_rewards + 1e-4)
+
+            advantages = advantages[process_slice]
+            idx = [local_i for local_i, i in enumerate(pidx) for _ in saving_idx_map[i]]
             advantages = torch.cat([
-                rewards[idx],
-                rewards[-n_global_prompts:][process_slice],
+                advantages[idx],
+                advantages,
             ], dim=0)
-            all_process_advantages = rewards.clone()  # keep the aggregated advantages for logging
         else:
+            # Gather the reward per function: this part is crucial, because the rewards are normalized per group and the
+            # completions may be distributed across processes
+            rewards_per_func = gather(rewards_per_func)
+            # Apply weights to each reward function's output and sum
+            rewards = (rewards_per_func * self.reward_weights.to(device).unsqueeze(0)).nansum(dim=1)
             # Compute grouped-wise rewards
             mean_grouped_rewards = rewards.view(-1, self.num_generations).mean(dim=1)
             std_grouped_rewards = rewards.view(-1, self.num_generations).std(dim=1)
@@ -1492,9 +1485,8 @@ class GRPOTrainer(Trainer):
         # Calculate mean reward per function, but only for samples where the function was applied (non-NaN values)
         for i, reward_func_name in enumerate(self.reward_func_names):
             if self.tool_use:
-                # Only compute mean/std for non-saving prompts
-                mean_rewards = torch.nanmean(rewards_per_func[-n_global_prompts:, i]).item()
-                std_rewards = nanstd(rewards_per_func[-n_global_prompts:, i]).item()
+                mean_rewards = torch.nanmean(rewards_per_func_global[:, i]).item()
+                std_rewards = nanstd(rewards_per_func_global[:, i]).item()
             else:
                 mean_rewards = torch.nanmean(rewards_per_func[:, i]).item()
                 std_rewards = nanstd(rewards_per_func[:, i]).item()
@@ -1504,31 +1496,40 @@ class GRPOTrainer(Trainer):
         self._metrics[mode]["reward_std"].append(std_grouped_rewards.mean().item())
         self._metrics[mode]["frac_reward_zero_std"].append(is_std_zero.float().mean().item())
 
-        # Log prompt and completion texts
+        # Log prompt and completion texts; No need to gather across processes as we log only very few
         self._textual_logs["prompt"].extend(prompts_text)
         self._textual_logs["completion"].extend(completions_text)
         if "solution" in inputs[0]:
-            if self.accelerator.is_main_process:
-                import pdb; pdb.set_trace()
-            self.accelerator.wait_for_everyone()
-            sols = [
-                inputs[local_i]['solution'] for local_i, i in enumerate(pidx) for _ in saving_idx_map[i]
-            ] + [x["solution"] for x in inputs]
+            if self.tool_use:
+                sols = [
+                    inputs[local_i]['solution'] for local_i, i in enumerate(pidx) for _ in saving_idx_map[i]
+                ] + [x["solution"] for x in inputs]
+            else:
+                sols = [x["solution"] for x in inputs]
             self._textual_logs["solution"].extend(sols)
         if "domain" in inputs[0]:
-            domains = [
-                inputs[local_i]['domain'] for local_i, i in enumerate(pidx) for _ in saving_idx_map[i]
-            ] + [x["domain"] for x in inputs]
+            if self.tool_use:
+                domains = [
+                    inputs[local_i]['domain'] for local_i, i in enumerate(pidx) for _ in saving_idx_map[i]
+                ] + [x["domain"] for x in inputs]
+            else:
+                domains = [x["domain"] for x in inputs]
             self._textual_logs["domain"].extend(domains)
         if "source" in inputs[0]:
-            sources = [
-                inputs[local_i]['source'] for local_i, i in enumerate(pidx) for _ in saving_idx_map[i]
-            ] + [x["source"] for x in inputs]
+            if self.tool_use:
+                sources = [
+                    inputs[local_i]['source'] for local_i, i in enumerate(pidx) for _ in saving_idx_map[i]
+                ] + [x["source"] for x in inputs]
+            else:
+                sources = [x["source"] for x in inputs]
             self._textual_logs["source"].extend(sources)
         for i, name in enumerate(self.reward_func_names):
-            self._textual_logs["rewards"][name].extend(rewards_per_func_pre[:, i].tolist())
-        # self._textual_logs["advantages"].extend(all_process_advantages.tolist())
+            self._textual_logs["rewards"][name].extend(rewards_per_func[:, i].tolist())
         self._textual_logs["advantages"].extend(advantages.tolist())
+
+        if self.accelerator.is_main_process:
+            import pdb; pdb.set_trace()
+        self.accelerator.wait_for_everyone()
 
         return {
             "prompt_ids": prompt_ids,
