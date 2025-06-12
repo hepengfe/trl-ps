@@ -134,8 +134,8 @@ def generate_with_tool_batch(
     N = len(prompts)
     contexts: List[str] = prompts[:]  # running transcripts
     prompts_len = [len(prompt) for prompt in prompts]
-    completions_to_return: List[str] = [] # adding intermediate savings
-    prompts_to_return: List[str] = []
+    saving_prompt_per_prompt = [[] for _ in range(N)]
+    saving_completions_per_prompt = [[] for _ in range(N)]
     tokens_left = [args.max_completion_length] * N
     done = [False] * N
 
@@ -298,8 +298,8 @@ def generate_with_tool_batch(
                     stats[global_i]["num_saving_exec_error"] += 1
 
                 # bookkeep the old thinking & summary
-                completions_to_return.append(contexts[global_i][prompts_len[global_i]:])
-                prompts_to_return.append(contexts[global_i][:prompts_len[global_i]])
+                saving_completions_per_prompt[global_i].append(contexts[global_i][prompts_len[global_i]:])
+                saving_prompt_per_prompt[global_i].append(contexts[global_i][:prompts_len[global_i]])
 
                 # Replace all old thinking with the summary
                 summary = f"{args.saving_tokens[0]}\n" + summary + f"\n{args.saving_tokens[1]}\n"
@@ -317,34 +317,31 @@ def generate_with_tool_batch(
                     contexts[global_i][: prompts_len[global_i]] # has \n at the end
                     + summary # TODO: Check if needs <think> at the end
                 )
-                prompts[global_i] = contexts[global_i]
-                prompts_len[global_i] = len(contexts[global_i])
+                
+                # TODO: The following two lines should be removed. Otherwise, we would have multiple savings before thinking, which is not the way that the model is trained.
+                # prompts[global_i] = contexts[global_i]
+                # prompts_len[global_i] = len(contexts[global_i])
 
             tool_duration = time.time() - tool_start
             print(f"[Time] {tool_type} tool call took {tool_duration:.2f} seconds")
 
-    # one more short call to get the final answer
-    # _, final_answer = _make_tool_inference_requests_batch(
-    #     contexts,
-    #     max_tokens=128,
-    #     args=args,
-    #     stop=[args.eos_token],
-    #     llm=llm,
-    # )
-    # for i in range(len(contexts)):
-    #     contexts[i] += final_answer[i] + f"\n{args.eos_token}"
-
-    prompts_to_return.extend(prompts)
-    for i, context in enumerate(contexts):
-        completions_to_return.append(context[prompts_len[i]:])
     
     # **IMPORTANT**: The returns are formatted as follows. Suppose there's 3 prompts, and each has 3 saving segments.
     # output0a looks like “thinking, saving”, output1b looks like “saving 1, thinking 2, saving 2", output1c looks like “saving 2, thinking 3, answer”
     # prompts_to_return = [prompts[0], prompts[0], ..., prompts[2], prompts[2], prompts[0], ..., prompts[2]]
     # completions_to_return = [output0a, output0b, ..., output2a, output2b, output0c, ..., output2c]
-    # i = tokenizer(completions_to_return).input_ids
-    # if any(len(x) > args.max_completion_length for x in i):
-    #     import pdb; pdb.set_trace()
+    completions_to_return: List[str] = []
+    prompts_to_return: List[str] = []
+    
+    for i, context in enumerate(contexts):
+        saving_prompt_per_prompt[i].append(context[prompts_len[i]:])
+        saving_completions_per_prompt[i].append(context[:prompts_len[i]])
+
+    for i in range(N):
+        prompts_to_return.extend(saving_prompt_per_prompt[i])
+        completions_to_return.extend(saving_completions_per_prompt[i])
+
+
     return prompts_to_return, completions_to_return, stats
     
     # to test RL masking, comment the above return and uncomment the following
