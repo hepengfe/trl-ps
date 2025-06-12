@@ -609,18 +609,20 @@ class GRPOTrainer(Trainer):
         # maxlen is set to the total number of forward passes per step. This value of `maxlen` ensures we log only the
         # final optimization step.
         # TODO: Change in case of saving (not super high prio as not all text is logged anyways)
-        if self.tool_use:
-            maxlen = self.accelerator.num_processes * args.per_device_train_batch_size * args.gradient_accumulation_steps
-        else:
-            maxlen = self.accelerator.num_processes * args.per_device_train_batch_size * args.steps_per_generation
+        # Removed self.accelerator.num_processes as logging only main process ones seems enough and avoids excess comms
+        maxlen = args.per_device_train_batch_size * args.steps_per_generation
             
         self._textual_logs = {
             "prompt": deque(maxlen=maxlen),
             "completion": deque(maxlen=maxlen),
             "rewards": defaultdict(lambda: deque(maxlen=maxlen)),
             "advantages": deque(maxlen=maxlen),
-            "answer": deque(maxlen=maxlen),
+            "solution": deque(maxlen=maxlen),
+            "domain": deque(maxlen=maxlen),
+            "source": deque(maxlen=maxlen),
         }
+
+        self.maxlen = maxlen
 
         # Ensure each process receives a unique seed to prevent duplicate completions when generating with
         # transformers if num_generations exceeds per_device_train_batch_size. We could skip it if we use vLLM, but
@@ -1206,6 +1208,9 @@ class GRPOTrainer(Trainer):
 
                     prompt_mask_all = broadcast_object_list(prompt_mask, from_process=0)
                     prompt_mask = [prompt_mask_all[j] for i in pidx for j in saving_idx_map[i]] + prompt_mask_all[-n_global_prompts:][process_slice]
+                    
+                    # Recreate prompts_text for logging later in case they have changed due to saving
+                    prompts_text = self.processing_class.batch_decode(prompt_ids, skip_special_tokens=False)
 
             # Generate completions using colocated vLLM instances: each device holds vLLM copy and work on their own batch of prompts
             elif self.vllm_mode == "colocate":
@@ -1424,40 +1429,35 @@ class GRPOTrainer(Trainer):
                 "Please ensure that at least one reward function returns a valid reward."
             )
 
-        # Gather the reward per function: this part is crucial, because the rewards are normalized per group and the
-        # completions may be distributed across processes
-        rewards_per_func = gather(rewards_per_func)
-
-        # Apply weights to each reward function's output and sum
-        rewards = (rewards_per_func * self.reward_weights.to(device).unsqueeze(0)).nansum(dim=1)
-
 
         if self.tool_use:
-            # Only compute group stats etc over non-saving prompts
-            mean_grouped_rewards = rewards[-n_global_prompts:].view(-1, self.num_generations).mean(dim=1)
-            std_grouped_rewards = rewards[-n_global_prompts:].view(-1, self.num_generations).std(dim=1)
+            # Only gather non-saving rewards
+            rewards_per_func_global = gather(rewards_per_func[-n_local_prompts:])
+            rewards = (rewards_per_func_global * self.reward_weights.to(device).unsqueeze(0)).nansum(dim=1)
+
+            mean_grouped_rewards = rewards.view(-1, self.num_generations).mean(dim=1)
+            std_grouped_rewards = rewards.view(-1, self.num_generations).std(dim=1)
 
             mean_grouped_rewards = mean_grouped_rewards.repeat_interleave(self.num_generations, dim=0)
             std_grouped_rewards = std_grouped_rewards.repeat_interleave(self.num_generations, dim=0)
             is_std_zero = torch.isclose(std_grouped_rewards, torch.zeros_like(std_grouped_rewards))
-            # Compute advantages
-            for k, vs in saving_idx_map.items():
-                for v in vs:
-                    rewards[v] -= mean_grouped_rewards[k]
-                    if self.scale_rewards:
-                        rewards[v] /= (std_grouped_rewards[k] + 1e-4)
-                rewards[-n_global_prompts:][k] -= mean_grouped_rewards[k]
-                if self.scale_rewards:
-                    rewards[-n_global_prompts:][k] /= (std_grouped_rewards[k] + 1e-4)
 
-            # Select local bits
-            idx = [j for i in pidx for j in saving_idx_map[i]]
+            advantages = rewards - mean_grouped_rewards
+            if self.scale_rewards:
+                advantages = advantages / (std_grouped_rewards + 1e-4)
+
+            advantages = advantages[process_slice]
+            idx = [local_i for local_i, i in enumerate(pidx) for _ in saving_idx_map[i]]
             advantages = torch.cat([
-                rewards[idx],
-                rewards[-n_global_prompts:][process_slice],
+                advantages[idx],
+                advantages,
             ], dim=0)
-            all_process_advantages = rewards.clone()  # keep the aggregated advantages for logging
         else:
+            # Gather the reward per function: this part is crucial, because the rewards are normalized per group and the
+            # completions may be distributed across processes
+            rewards_per_func = gather(rewards_per_func)
+            # Apply weights to each reward function's output and sum
+            rewards = (rewards_per_func * self.reward_weights.to(device).unsqueeze(0)).nansum(dim=1)
             # Compute grouped-wise rewards
             mean_grouped_rewards = rewards.view(-1, self.num_generations).mean(dim=1)
             std_grouped_rewards = rewards.view(-1, self.num_generations).std(dim=1)
@@ -1484,9 +1484,8 @@ class GRPOTrainer(Trainer):
         # Calculate mean reward per function, but only for samples where the function was applied (non-NaN values)
         for i, reward_func_name in enumerate(self.reward_func_names):
             if self.tool_use:
-                # Only compute mean/std for non-saving prompts
-                mean_rewards = torch.nanmean(rewards_per_func[-n_global_prompts:, i]).item()
-                std_rewards = nanstd(rewards_per_func[-n_global_prompts:, i]).item()
+                mean_rewards = torch.nanmean(rewards_per_func_global[:, i]).item()
+                std_rewards = nanstd(rewards_per_func_global[:, i]).item()
             else:
                 mean_rewards = torch.nanmean(rewards_per_func[:, i]).item()
                 std_rewards = nanstd(rewards_per_func[:, i]).item()
@@ -1496,14 +1495,37 @@ class GRPOTrainer(Trainer):
         self._metrics[mode]["reward_std"].append(std_grouped_rewards.mean().item())
         self._metrics[mode]["frac_reward_zero_std"].append(is_std_zero.float().mean().item())
 
-        # Log prompt and completion texts
-        self._textual_logs["prompt"].extend(gather_object(prompts_text))
-        self._textual_logs["completion"].extend(gather_object(completions_text))
-        if "answer" in inputs[0]:
-            self._textual_logs["answer"].extend(gather_object([x["answer"] for x in inputs]))
+        # Log prompt and completion texts; No need to gather across processes as we log only very few
+        # :maxlen as it may be longer due to saving in which case we want the saving ones at the start logged
+        self._textual_logs["prompt"].extend(prompts_text[:self.maxlen])
+        self._textual_logs["completion"].extend(completions_text[:self.maxlen])
+        if "solution" in inputs[0]:
+            if self.tool_use:
+                sols = [
+                    inputs[local_i]['solution'] for local_i, i in enumerate(pidx) for _ in saving_idx_map[i]
+                ] + [x["solution"] for x in inputs]
+            else:
+                sols = [x["solution"] for x in inputs]
+            self._textual_logs["solution"].extend(sols[:self.maxlen])
+        if "domain" in inputs[0]:
+            if self.tool_use:
+                domains = [
+                    inputs[local_i]['domain'] for local_i, i in enumerate(pidx) for _ in saving_idx_map[i]
+                ] + [x["domain"] for x in inputs]
+            else:
+                domains = [x["domain"] for x in inputs]
+            self._textual_logs["domain"].extend(domains[:self.maxlen])
+        if "source" in inputs[0]:
+            if self.tool_use:
+                sources = [
+                    inputs[local_i]['source'] for local_i, i in enumerate(pidx) for _ in saving_idx_map[i]
+                ] + [x["source"] for x in inputs]
+            else:
+                sources = [x["source"] for x in inputs]
+            self._textual_logs["source"].extend(sources[:self.maxlen])
         for i, name in enumerate(self.reward_func_names):
-            self._textual_logs["rewards"][name].extend(rewards_per_func[:, i].tolist())
-        self._textual_logs["advantages"].extend(all_process_advantages.tolist())
+            self._textual_logs["rewards"][name].extend(rewards_per_func[:, i].tolist()[:self.maxlen])
+        self._textual_logs["advantages"].extend(advantages.tolist()[:self.maxlen])
 
         return {
             "prompt_ids": prompt_ids,
@@ -1739,8 +1761,12 @@ class GRPOTrainer(Trainer):
                     **self._textual_logs["rewards"],
                     "advantage": self._textual_logs["advantages"],
                 }
-                if "answer" in self._textual_logs:
-                    table["answer"] = self._textual_logs["answer"]
+                if self._textual_logs.get("solution"):
+                    table["solution"] = self._textual_logs["solution"]
+                if self._textual_logs.get("domain"):
+                    table["domain"] = self._textual_logs["domain"]
+                if self._textual_logs.get("source"):
+                    table["source"] = self._textual_logs["source"]
                 df = pd.DataFrame(table)
                 if self.wandb_log_unique_prompts:
                     df = df.drop_duplicates(subset=["prompt"])

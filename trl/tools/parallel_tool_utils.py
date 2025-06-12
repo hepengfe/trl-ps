@@ -86,7 +86,7 @@ def _make_tool_inference_requests_batch(
 
         j = resp.json()
         return j["completion_ids"], j["completion_text"]  # type: ignore[return-value]
-    
+
     elif args.vllm_mode == "colocate":
         assert llm is not None, "Require llm for tool inference"
         sampling_params = SamplingParams(
@@ -270,13 +270,10 @@ def generate_with_tool_batch(
                 saving_completions_per_prompt[global_i].append(contexts[global_i][prompts_len[global_i]:] + args.eos_token)
                 saving_prompt_per_prompt[global_i].append(contexts[global_i][:prompts_len[global_i]])
 
-                contexts[global_i] = (
-                    contexts[global_i][:prompts_len[global_i]]
-                    + f"{args.saving_tokens[0]}\n{summary}\n{args.saving_tokens[1]}\n"
-                )
-
-                toks = len(tokenizer(f"\n{args.saving_tokens[0]}\n" + summary + f"\n{args.saving_tokens[1]}\n").input_ids)
-                tokens_left[global_i] = args.max_completion_length - toks
+                #  f"{args.saving_tokens[0]}\n{summary}\n{args.saving_tokens[1]}\n"
+                add = f"{args.saving_tokens[0]}\n{summary}\n{args.saving_tokens[1]}\n{args.thinking_tokens[0]}\n"
+                contexts[global_i] = contexts[global_i][:prompts_len[global_i]] + add
+                tokens_left[global_i] = args.max_completion_length - len(tokenizer(add).input_ids)
             else:
                 tool_jobs.append((global_i, deepcopy(detect), contexts[global_i], args, tokenizer))
 
