@@ -201,9 +201,8 @@ def generate_with_tool_batch(
     N = len(prompts)
     contexts = prompts[:]
     prompts_len = [len(p) for p in prompts]
-    completions_to_return = []
-    contexts_to_return = []
-    prompts_to_return = []
+    saving_prompt_per_prompt = [[] for _ in range(N)]
+    saving_completions_per_prompt = [[] for _ in range(N)]
     tokens_left = [args.max_completion_length] * N
     done = [False] * N
     stats = [
@@ -268,9 +267,8 @@ def generate_with_tool_batch(
                     summary = ""
                     stats[global_i]["num_saving_exec_error"] += 1
 
-                contexts_to_return.append(contexts[global_i] + args.eos_token)
-                completions_to_return.append(contexts[global_i][prompts_len[global_i]:] + args.eos_token)
-                prompts_to_return.append(contexts[global_i][:prompts_len[global_i]])
+                saving_completions_per_prompt[global_i].append(contexts[global_i][prompts_len[global_i]:] + args.eos_token)
+                saving_prompt_per_prompt[global_i].append(contexts[global_i][:prompts_len[global_i]])
 
                 contexts[global_i] = (
                     contexts[global_i][:prompts_len[global_i]]
@@ -308,7 +306,14 @@ def generate_with_tool_batch(
             tool_duration = time.time() - tool_start
             print(f"[Time] {tool_duration:.2f} seconds for {len(tool_jobs)} parallel tool calls. Avg {tool_duration / len(tool_jobs):.2f} seconds.")
 
-    contexts_to_return.extend(contexts)
+
+    completions_to_return: List[str] = []
+    prompts_to_return: List[str] = []
+
+    for i in range(N):
+        prompts_to_return.extend(saving_prompt_per_prompt[i])
+        completions_to_return.extend(saving_completions_per_prompt[i])
+        
     prompts_to_return.extend(prompts)
     for i, context in enumerate(contexts):
         completions_to_return.append(context[prompts_len[i]:])

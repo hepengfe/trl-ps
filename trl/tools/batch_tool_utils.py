@@ -317,10 +317,6 @@ def generate_with_tool_batch(
                     contexts[global_i][: prompts_len[global_i]] # has \n at the end
                     + summary # TODO: Check if needs <think> at the end
                 )
-                
-                # TODO: The following two lines should be removed. Otherwise, we would have multiple savings before thinking, which is not the way that the model is trained.
-                # prompts[global_i] = contexts[global_i]
-                # prompts_len[global_i] = len(contexts[global_i])
 
             tool_duration = time.time() - tool_start
             print(f"[Time] {tool_type} tool call took {tool_duration:.2f} seconds")
@@ -332,15 +328,14 @@ def generate_with_tool_batch(
     # completions_to_return = [output0a, output0b, ..., output2a, output2b, output0c, ..., output2c]
     completions_to_return: List[str] = []
     prompts_to_return: List[str] = []
-    
-    for i, context in enumerate(contexts):
-        saving_prompt_per_prompt[i].append(context[prompts_len[i]:])
-        saving_completions_per_prompt[i].append(context[:prompts_len[i]])
 
     for i in range(N):
         prompts_to_return.extend(saving_prompt_per_prompt[i])
         completions_to_return.extend(saving_completions_per_prompt[i])
 
+    for i, context in enumerate(contexts):
+        completions_to_return.append(context[prompts_len[i]:])
+        prompts_to_return.append(context[:prompts_len[i]])
 
     return prompts_to_return, completions_to_return, stats
     
