@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
+import time
 import multiprocessing
 import os
 import textwrap
@@ -1161,6 +1161,8 @@ class GRPOTrainer(Trainer):
                             print("Tool stats", tool_stats)
                 else:
                     completion_ids = [None] * len(all_prompts_text)
+                    # Wait for 10min
+                    time.sleep(600)
 
                 # Account for new saving prompts
                 if self.tool_use:

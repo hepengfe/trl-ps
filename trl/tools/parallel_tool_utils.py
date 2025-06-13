@@ -120,7 +120,7 @@ def _execute_tool_job(args):
     try:
         tool_type = detect["tool_type"]
         if tool_type == "python":
-            print("Calling Python Interpreter")
+            # print("Calling Python Interpreter")
             if isinstance(detect["tool_argument"], str):
                 code = detect["tool_argument"]
             else:
@@ -149,7 +149,7 @@ def _execute_tool_job(args):
             return global_i, tool_type, context, exec_error
 
         elif tool_type in ("retrieval", "retrieve"):
-            print("Calling Web Retriever")
+            # print("Calling Web Retriever")
             try:
                 result = google_retriever(**detect["tool_argument"])
                 result_text = result.response if result else ""
