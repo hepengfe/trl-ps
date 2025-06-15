@@ -1161,8 +1161,7 @@ class GRPOTrainer(Trainer):
                             print("Tool stats", tool_stats)
                 else:
                     completion_ids = [None] * len(all_prompts_text)
-                    # Wait for 10min
-                    time.sleep(600)
+                self.accelerator.wait_for_everyone()
 
                 # Account for new saving prompts
                 if self.tool_use:
@@ -1189,17 +1188,20 @@ class GRPOTrainer(Trainer):
                     # Create dict mapping from prompt idx to all saving idx for it
                     saving_idx_map = {i: [] for i in range(n_global_prompts)}
                     idx = 0
-                    for i, c in enumerate(completion_ids_all[-n_global_prompts:]): # Iterate through final completions
-                        # Check if continuation has saving
-                        if self.processing_class.convert_tokens_to_ids(self.args.saving_tokens[0]) in c:
-                            # Check how many savings
-                            saving_idx_map[i].append(idx) # first one has no saving token but the tool call e.g. <tool_call>\n{"name": "saving", "arguments": {...
-                            idx += 1
-                            while self.processing_class.convert_tokens_to_ids(self.args.saving_tokens[0]) in completion_ids_all[idx]:
-                                saving_idx_map[i].append(idx)
+                    n_savings = len(completion_ids_all) - n_global_prompts
+                    while idx < n_savings:
+                        for i, c in enumerate(completion_ids_all[-n_global_prompts:]): # Iterate through final completions
+                            # Check if continuation has saving
+                            if self.processing_class.convert_tokens_to_ids(self.args.saving_tokens[0]) in c:
+                                # Check how many savings
+                                saving_idx_map[i].append(idx) # first one has no saving token but the tool call e.g. <tool_call>\n{"name": "saving", "arguments": {...
                                 idx += 1
-                                if idx >= len(completion_ids_all[:-n_global_prompts]):
-                                    break
+                                if idx >= n_savings: break
+                                while self.processing_class.convert_tokens_to_ids(self.args.saving_tokens[0]) in completion_ids_all[idx]:
+                                    saving_idx_map[i].append(idx)
+                                    idx += 1
+                                    if idx >= n_savings: break
+
 
                     pidx = list(range(self.accelerator.process_index * n_local_prompts, (self.accelerator.process_index + 1) * n_local_prompts))
 
