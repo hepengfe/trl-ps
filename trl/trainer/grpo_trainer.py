@@ -1436,7 +1436,9 @@ class GRPOTrainer(Trainer):
 
         if self.tool_use:
             # Only gather non-saving rewards
+            print("BEFOREGATHER1", rewards_per_func[-n_local_prompts:].shape, self.accelerator.process_index, self.accelerator.num_processes)
             rewards_per_func_global = gather(rewards_per_func[-n_local_prompts:])
+            print("POSTGATHER1", self.accelerator.process_index, self.accelerator.num_processes)
             rewards = (rewards_per_func_global * self.reward_weights.to(device).unsqueeze(0)).nansum(dim=1)
 
             mean_grouped_rewards = rewards.view(-1, self.num_generations).mean(dim=1)
@@ -1531,6 +1533,7 @@ class GRPOTrainer(Trainer):
             self._textual_logs["rewards"][name].extend(rewards_per_func[:, i].tolist()[:self.maxlen])
         self._textual_logs["advantages"].extend(advantages.tolist()[:self.maxlen])
 
+        print("PRERETURN", self.accelerator.process_index, self.accelerator.num_processes)
         return {
             "prompt_ids": prompt_ids,
             "prompt_mask": prompt_mask,
