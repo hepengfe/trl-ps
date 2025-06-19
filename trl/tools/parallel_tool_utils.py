@@ -166,6 +166,9 @@ def _execute_tool_job(args):
             )
             print(f"Web Retriever Finished. Result: {result_text[:30]}")
             return global_i, tool_type, context, exec_error
+        else:
+            # Sometimes the model generates an invalid tool type.
+            raise ValueError(f"Unknown tool type: {tool_type}")
 
     except Exception as e:
         print(f"[ERROR] Tool job failed for idx={global_i}: {e}")
