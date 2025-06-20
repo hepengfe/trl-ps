@@ -1141,6 +1141,7 @@ class GRPOTrainer(Trainer):
                             completion_ids = self.processing_class(text=completions)["input_ids"]
                             prompt_ids, prompt_mask = self.processing_class(text=prompts).values()
                             n_prompts = [len(prompts)]
+                            print("NPROMPTS", n_prompts)
 
                             # avg tool_stats
                             tool_stats_avg = {}

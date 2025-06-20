@@ -29,7 +29,7 @@ import os
 import traceback
 import multiprocessing as mp
 
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
 from copy import deepcopy
 
 from .python_and_retriever import (
@@ -282,7 +282,7 @@ def generate_with_tool_batch(
 
         tool_start = time.time()
         if tool_jobs:
-            with ThreadPoolExecutor(max_workers=min(len(tool_jobs), os.cpu_count())) as executor:
+            with ProcessPoolExecutor(max_workers=min(len(tool_jobs), os.cpu_count())) as executor:
                 results = list(executor.map(_execute_tool_job, tool_jobs))
 
             for global_i, tool_type, updated_context, exec_error in results:

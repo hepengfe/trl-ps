@@ -50,7 +50,7 @@ import concurrent.futures
 
 def run_with_timeout(func, args=(), kwargs=None, timeout=30):
     kwargs = kwargs or {}
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+    with concurrent.futures.ProcessPoolExecutor(max_workers=1) as executor:
         future = executor.submit(func, *args, **kwargs)
         return future.result(timeout=timeout)
 
@@ -100,7 +100,7 @@ def google_retriever(query, retrieve_websites = 2):
             print(e)
             continue
 
-def execute_and_capture(code: str, client, max_attempts: int = 3) -> tuple:
+def execute_and_capture_threading(code: str, client, max_attempts: int = 3) -> tuple:
     """
     Execute the given Python code and capture its stdout and stderr
     in a thread-safe manner by overriding builtins.print and sys.stderr.
@@ -145,11 +145,117 @@ def execute_and_capture(code: str, client, max_attempts: int = 3) -> tuple:
         thread.start()
         thread.join(timeout=30)
         if thread.is_alive():
+            print("Execution timed out, terminating thread.")
             stderr_capture.write("Execution timed out: code exceeded 30 seconds.\n")
             thread.join()  # Clean up thread
 
         stdout_str = stdout_capture.getvalue()
         stderr_str = stderr_capture.getvalue()
+
+        # If stdout is produced, return immediately
+        if stdout_str.strip():
+            return code, stdout_str, stderr_str
+
+        # Prepare debug prompt for AI
+        error_output = stderr_str or "No output was produced."
+        debug_prompt = (
+            f"The following Python code ran without producing stdout:\n{code}\n"
+            f"Error or empty stdout:\n{error_output}\n"
+            "Please debug it and add print statements as needed. "
+            "Only return the modified Python code."
+        )
+
+        # Request modified code from AI
+        response = client.chat.completions.create(
+            messages=[{"role": "user", "content": debug_prompt}],
+            model=base_model,
+        )
+        code = remove_python_prefix(response.choices[0].message.content.strip())
+        print("Retrying with modified code")
+
+    raise Exception(f"Python Debug Fail after {max_attempts} attempts.")
+
+import io
+import builtins
+import traceback
+import types
+import multiprocessing
+from multiprocessing import Process, Queue
+
+def run_code_in_subprocess(code: str, queue: Queue):
+    """
+    Worker function that runs code and sends back stdout and stderr through a queue.
+    """
+    stdout_capture = io.StringIO()
+    stderr_capture = io.StringIO()
+
+    def custom_print(*args, **kwargs):
+        builtins.print(*args, file=stdout_capture, **kwargs)
+
+    def blocked_func(name):
+        def f(*args, **kwargs):
+            raise RuntimeError(f"{name}() is disabled in this environment")
+        return f
+
+    custom_builtins = {
+        'print': custom_print,
+        'input': blocked_func("input"),
+        'open': blocked_func("open"),
+        # You might want to whitelist more safe builtins here
+        'range': range,
+        'len': len,
+        'int': int,
+        'float': float,
+        'str': str,
+        'bool': bool,
+        'dict': dict,
+        'list': list,
+        'set': set,
+        'tuple': tuple,
+        'Exception': Exception,
+        # add more if needed
+    }
+
+    fake_sys = types.SimpleNamespace(stderr=stderr_capture)
+
+    globals_dict = {
+        '__builtins__': custom_builtins,
+        'sys': fake_sys,
+        '__name__': '__main__',
+    }
+
+    try:
+        exec(code, globals_dict)
+    except Exception:
+        traceback.print_exc(file=stderr_capture)
+
+    # Send results back to parent
+    queue.put((stdout_capture.getvalue(), stderr_capture.getvalue()))
+
+
+def execute_and_capture(code: str, client, base_model: str, max_attempts: int = 3, timeout: int = 30) -> tuple:
+    """
+    Execute the given Python code and capture its stdout and stderr
+    using multiprocessing to safely enforce timeouts.
+    """
+    code = remove_python_prefix(code)
+
+    for attempt in range(max_attempts):
+        queue = multiprocessing.Queue()
+        proc = Process(target=run_code_in_subprocess, args=(code, queue))
+        proc.start()
+        proc.join(timeout)
+
+        if proc.is_alive():
+            proc.terminate()
+            proc.join()
+            stderr_str = "Execution timed out: code exceeded {} seconds.\n".format(timeout)
+            stdout_str = ""
+        else:
+            try:
+                stdout_str, stderr_str = queue.get_nowait()
+            except Exception:
+                stdout_str, stderr_str = "", "Failed to retrieve output from subprocess.\n"
 
         # If stdout is produced, return immediately
         if stdout_str.strip():
