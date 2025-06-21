@@ -219,6 +219,8 @@ def generate_with_tool_batch(
         "num_saving_exec_error": 0,
         } for _ in range(N)
     ]
+    malformed_tool_call_str = f"\n{args.result_tokens[0]}\n{args.result_tokens[1]}\n"
+    malformed_tool_call_len = len(tokenizer(malformed_tool_call_str).input_ids)
 
     step = 0
     while not all(done) and step < 20:
@@ -250,7 +252,9 @@ def generate_with_tool_batch(
             if detect["error_tool_use"]:
                 stats[global_i]["num_tool_detect_error"] += 1
                 print(f"[{global_i}] malformed tool call – skipping tool use.")
-                contexts[global_i] += f"\n{args.result_tokens[0]}\n{args.result_tokens[1]}\n"
+                contexts[global_i] += malformed_tool_call_str
+                tokens_left[global_i] -= malformed_tool_call_len
+                stats[global_i]["generated_tokens"] += malformed_tool_call_len
                 continue
 
             if not detect["tool_use"]:
@@ -260,8 +264,8 @@ def generate_with_tool_batch(
                 elif tokens_left[global_i] <= 0:
                     done[global_i] = True
                 continue
-
             tool_type = detect["tool_type"]
+
             if tool_type == "saving":
                 stats[global_i]["num_saving"] += 1
                 try:
@@ -273,7 +277,6 @@ def generate_with_tool_batch(
                 saving_completions_per_prompt[global_i].append(contexts[global_i][prompts_len[global_i]:] + args.eos_token)
                 saving_prompt_per_prompt[global_i].append(contexts[global_i][:prompts_len[global_i]])
 
-                #  f"{args.saving_tokens[0]}\n{summary}\n{args.saving_tokens[1]}\n"
                 add = f"{args.saving_tokens[0]}\n{summary}\n{args.saving_tokens[1]}\n{args.thinking_tokens[0]}\n"
                 contexts[global_i] = contexts[global_i][:prompts_len[global_i]] + add
                 tokens_left[global_i] = args.max_completion_length - len(tokenizer(add).input_ids)
@@ -288,7 +291,7 @@ def generate_with_tool_batch(
             for global_i, tool_type, updated_context, exec_error in results:
                 toks = tokenizer(updated_context).input_ids
                 n_toks = len(toks)
-                if n_toks > args.max_completion_length:
+                if n_toks >= args.max_completion_length:
                     done[global_i] = True
                     updated_context = tokenizer.decode(toks[:args.max_completion_length])
                     n_toks = args.max_completion_length

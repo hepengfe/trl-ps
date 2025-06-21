@@ -12,8 +12,6 @@ import types
 import builtins
 import multiprocessing
 import sys
-import builtins
-import types
 import time
 
 from trl.tools.key_rotator import openai_key_rotator, google_key_rotator, get_openai_client
@@ -175,87 +173,66 @@ def execute_and_capture_threading(code: str, client, max_attempts: int = 3) -> t
 
     raise Exception(f"Python Debug Fail after {max_attempts} attempts.")
 
-import io
-import builtins
-import traceback
-import types
-import multiprocessing
-from multiprocessing import Process, Queue
 
-def run_code_in_subprocess(code: str, queue: Queue):
-    """
-    Worker function that runs code and sends back stdout and stderr through a queue.
-    """
-    stdout_capture = io.StringIO()
-    stderr_capture = io.StringIO()
-
-    def custom_print(*args, **kwargs):
-        builtins.print(*args, file=stdout_capture, **kwargs)
-
-    def blocked_func(name):
-        def f(*args, **kwargs):
-            raise RuntimeError(f"{name}() is disabled in this environment")
-        return f
-
-    custom_builtins = {
-        'print': custom_print,
-        'input': blocked_func("input"),
-        'open': blocked_func("open"),
-        # You might want to whitelist more safe builtins here
-        'range': range,
-        'len': len,
-        'int': int,
-        'float': float,
-        'str': str,
-        'bool': bool,
-        'dict': dict,
-        'list': list,
-        'set': set,
-        'tuple': tuple,
-        'Exception': Exception,
-        # add more if needed
-    }
-
-    fake_sys = types.SimpleNamespace(stderr=stderr_capture)
-
-    globals_dict = {
-        '__builtins__': custom_builtins,
-        'sys': fake_sys,
-        '__name__': '__main__',
-    }
-
-    try:
-        exec(code, globals_dict)
-    except Exception:
-        traceback.print_exc(file=stderr_capture)
-
-    # Send results back to parent
-    queue.put((stdout_capture.getvalue(), stderr_capture.getvalue()))
-
-
-def execute_and_capture(code: str, client, base_model: str, max_attempts: int = 3, timeout: int = 30) -> tuple:
+def execute_and_capture(code: str, client, max_attempts: int = 3) -> tuple:
     """
     Execute the given Python code and capture its stdout and stderr
-    using multiprocessing to safely enforce timeouts.
+    in a process-safe manner by overriding builtins.print and sys.stderr.
     """
     code = remove_python_prefix(code)
 
+    def run_code_in_process(code: str, queue: multiprocessing.Queue):
+        stdout_capture = io.StringIO()
+        stderr_capture = io.StringIO()
+
+        # Custom builtins with overridden print
+        custom_builtins = builtins.__dict__.copy()
+
+        def custom_print(*args, **kwargs):
+            builtins.print(*args, file=stdout_capture, **kwargs)
+
+        def blocked_func(name):
+            def f(*args, **kwargs):
+                raise RuntimeError(f"{name}() is disabled in this environment")
+            return f
+
+        custom_builtins['print'] = custom_print
+        custom_builtins['input'] = blocked_func("input")
+        custom_builtins['open'] = blocked_func("open")
+
+        # Fake sys for stderr capture
+        fake_sys = types.SimpleNamespace(stderr=stderr_capture)
+
+        # Execution environment
+        globals_dict = {
+            '__builtins__': custom_builtins,
+            'sys': fake_sys,
+            '__name__': '__main__',
+        }
+
+        try:
+            exec(code, globals_dict)
+        except Exception:
+            traceback.print_exc(file=stderr_capture)
+
+        queue.put((stdout_capture.getvalue(), stderr_capture.getvalue()))
+
     for attempt in range(max_attempts):
         queue = multiprocessing.Queue()
-        proc = Process(target=run_code_in_subprocess, args=(code, queue))
-        proc.start()
-        proc.join(timeout)
-
-        if proc.is_alive():
-            proc.terminate()
-            proc.join()
-            stderr_str = "Execution timed out: code exceeded {} seconds.\n".format(timeout)
+        process = multiprocessing.Process(target=run_code_in_process, args=(code, queue))
+        process.start()
+        process.join(timeout=30)
+        if process.is_alive():
+            print("Execution timed out, terminating process.")
+            process.terminate()
+            process.join()
             stdout_str = ""
+            stderr_str = "Execution timed out: code exceeded 30 seconds.\n"
         else:
             try:
                 stdout_str, stderr_str = queue.get_nowait()
             except Exception:
-                stdout_str, stderr_str = "", "Failed to retrieve output from subprocess.\n"
+                stdout_str, stderr_str = "", "Failed to retrieve output from process.\n"
 
         # If stdout is produced, return immediately
         if stdout_str.strip():
