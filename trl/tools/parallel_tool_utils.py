@@ -161,7 +161,7 @@ def _execute_tool_job(args):
                 exec_error = True
 
             context = (
-                context +
+                context + # Ctxt already finishes with \n
                 f"{args_.result_tokens[0]}\n" + result_text + f"\n{args_.result_tokens[1]}\n"
             )
             print(f"Web Retriever Finished. Result: {result_text[:30]}")
@@ -226,8 +226,7 @@ def generate_with_tool_batch(
     while not all(done) and step < 20:
         step += 1
         active_idx = [i for i, d in enumerate(done) if not d and tokens_left[i] > 0]
-        if len(active_idx) == 0:
-            break
+        if len(active_idx) == 0: break
         active_prompts = [contexts[i] for i in active_idx]
 
         comp_ids_list, comp_text_list = _make_tool_inference_requests_batch(
@@ -252,9 +251,12 @@ def generate_with_tool_batch(
             if detect["error_tool_use"]:
                 stats[global_i]["num_tool_detect_error"] += 1
                 print(f"[{global_i}] malformed tool call – skipping tool use.")
-                contexts[global_i] += malformed_tool_call_str
-                tokens_left[global_i] -= malformed_tool_call_len
-                stats[global_i]["generated_tokens"] += malformed_tool_call_len
+                if tokens_left[global_i] > malformed_tool_call_len:
+                    contexts[global_i] += malformed_tool_call_str
+                    tokens_left[global_i] -= malformed_tool_call_len
+                    stats[global_i]["generated_tokens"] += malformed_tool_call_len
+                else:
+                    done[global_i] = True
                 continue
 
             if not detect["tool_use"]:
@@ -321,4 +323,8 @@ def generate_with_tool_batch(
     for i, context in enumerate(contexts):
         completions_to_return.append(context[prompts_len[i]:])
 
+    if any(x < 0 for x in tokens_left):
+        import pdb; pdb.set_trace()
+    if any(len(tokenizer(c).input_ids) > args.max_completion_length for c in completions_to_return):
+        import pdb; pdb.set_trace()
     return prompts_to_return, completions_to_return, stats
