@@ -323,8 +323,20 @@ def generate_with_tool_batch(
     for i, context in enumerate(contexts):
         completions_to_return.append(context[prompts_len[i]:])
 
-    if any(x < 0 for x in tokens_left):
-        import pdb; pdb.set_trace()
-    if any(len(tokenizer(c).input_ids) > args.max_completion_length for c in completions_to_return):
-        import pdb; pdb.set_trace()
+    # if any(len(tokenizer(c).input_ids) > args.max_completion_length for c in completions_to_return):
+    #     import pdb; pdb.set_trace()
+    # Tokenizers are not deterministic:
+    # When the model generates in vLLM it may generate these tokens:
+    # ['Ġto', 'ĠFG', 'NM', 'Ġto']
+    # when they are decoded and provided as completions text it turns into
+    #  to FGNM to
+    # when they are retokenized it turns into
+    # ['Ġto', 'ĠF', 'GN', 'M', 'Ġto']
+    # hence the below retruncates to avoid > max seq len.
+    # The code above can be used for detection.
+    for i, c in enumerate(completions_to_return):
+        toks = tokenizer(c).input_ids
+        if len(toks) > args.max_completion_length:
+            completions_to_return[i] = tokenizer.decode(toks[:args.max_completion_length])
+
     return prompts_to_return, completions_to_return, stats
