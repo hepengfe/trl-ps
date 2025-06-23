@@ -339,4 +339,5 @@ def generate_with_tool_batch(
         if len(toks) > args.max_completion_length:
             completions_to_return[i] = tokenizer.decode(toks[:args.max_completion_length])
 
+    import pdb; pdb.set_trace()
     return prompts_to_return, completions_to_return, stats

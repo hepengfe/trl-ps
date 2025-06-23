@@ -11,7 +11,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import time
 import multiprocessing
 import os
 import textwrap
@@ -1141,7 +1140,6 @@ class GRPOTrainer(Trainer):
                             completion_ids = self.processing_class(text=completions)["input_ids"]
                             prompt_ids, prompt_mask = self.processing_class(text=prompts).values()
                             n_prompts = [len(prompts)]
-                            print("NPROMPTS", n_prompts)
 
                             # avg tool_stats
                             tool_stats_avg = {}
