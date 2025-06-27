@@ -507,6 +507,7 @@ class GRPOTrainer(Trainer):
         self.use_vllm = args.use_vllm
         self.vllm_mode = args.vllm_mode
         self.tool_use = args.tool_use
+        self.tool_saving = False
         self.vllm_gpu_memory_utilization = args.vllm_gpu_memory_utilization  # only applies to colocation mode
         self.vllm_tensor_parallel_size = args.vllm_tensor_parallel_size  # only applies to colocation mode
         self.use_liger_loss = args.use_liger_loss
@@ -1186,21 +1187,21 @@ class GRPOTrainer(Trainer):
                 if self.tool_use:
                     # Create dict mapping from prompt idx to all saving idx for it
                     saving_idx_map = {i: [] for i in range(n_global_prompts)}
-                    idx = 0
-                    n_savings = len(completion_ids_all) - n_global_prompts
-                    while idx < n_savings:
-                        for i, c in enumerate(completion_ids_all[-n_global_prompts:]): # Iterate through final completions
-                            # Check if continuation has saving
-                            if self.processing_class.convert_tokens_to_ids(self.args.saving_tokens[0]) in c:
-                                # Check how many savings
-                                saving_idx_map[i].append(idx) # first one has no saving token but the tool call e.g. <tool_call>\n{"name": "saving", "arguments": {...
-                                idx += 1
-                                if idx >= n_savings: break
-                                while self.processing_class.convert_tokens_to_ids(self.args.saving_tokens[0]) in completion_ids_all[idx]:
-                                    saving_idx_map[i].append(idx)
+                    if self.tool_saving:
+                        idx = 0
+                        n_savings = len(completion_ids_all) - n_global_prompts
+                        while idx < n_savings:
+                            for i, c in enumerate(completion_ids_all[-n_global_prompts:]): # Iterate through final completions
+                                # Check if continuation has saving
+                                if self.processing_class.convert_tokens_to_ids(self.args.saving_tokens[0]) in c:
+                                    # Check how many savings
+                                    saving_idx_map[i].append(idx) # first one has no saving token but the tool call e.g. <tool_call>\n{"name": "saving", "arguments": {...
                                     idx += 1
                                     if idx >= n_savings: break
-
+                                    while self.processing_class.convert_tokens_to_ids(self.args.saving_tokens[0]) in completion_ids_all[idx]:
+                                        saving_idx_map[i].append(idx)
+                                        idx += 1
+                                        if idx >= n_savings: break
 
                     pidx = list(range(self.accelerator.process_index * n_local_prompts, (self.accelerator.process_index + 1) * n_local_prompts))
 
@@ -1298,7 +1299,7 @@ class GRPOTrainer(Trainer):
         completion_lengths = completion_mask.sum(1)
         
         # log completion lengths, mean, min, max here to avoid truncation changing them
-        if self.tool_use:
+        if self.tool_saving:
             # Ensure shapes match across processes; fine to ignore saving for logging
             agg_completion_lengths = self.accelerator.gather(completion_lengths[-n_local_prompts:])
         else:
@@ -1326,7 +1327,7 @@ class GRPOTrainer(Trainer):
         self._metrics[mode]["num_tokens"] = [self.state.num_input_tokens_seen]
 
         # Identify sequences that terminated with EOS and log their lengths
-        if self.tool_use:
+        if self.tool_saving:
             agg_terminated_with_eos = self.accelerator.gather(is_eos.any(dim=1)[-n_local_prompts:])
         else:
             agg_terminated_with_eos = self.accelerator.gather(is_eos.any(dim=1))
@@ -1393,7 +1394,7 @@ class GRPOTrainer(Trainer):
                     keys = [key for key in inputs[0] if key not in ["prompt", "completion"]]
                     reward_kwargs = {key: [example[key] for example in inputs] for key in keys}
 
-                    if self.tool_use:
+                    if self.tool_saving:
                         # prompts are not needed for any reward funcs used
                         output_reward_func = reward_func(
                             completions=completions[-n_local_prompts:], **reward_kwargs
@@ -1440,11 +1441,9 @@ class GRPOTrainer(Trainer):
             )
 
 
-        if self.tool_use:
+        if self.tool_saving:
             # Only gather non-saving rewards
-            # print("BEFOREGATHER1", rewards_per_func[-n_local_prompts:].shape, self.accelerator.process_index, self.accelerator.num_processes)
             rewards_per_func_global = gather(rewards_per_func[-n_local_prompts:])
-            # print("POSTGATHER1", self.accelerator.process_index, self.accelerator.num_processes)
             rewards = (rewards_per_func_global * self.reward_weights.to(device).unsqueeze(0)).nansum(dim=1)
 
             mean_grouped_rewards = rewards.view(-1, self.num_generations).mean(dim=1)
@@ -1495,7 +1494,7 @@ class GRPOTrainer(Trainer):
 
         # Calculate mean reward per function, but only for samples where the function was applied (non-NaN values)
         for i, reward_func_name in enumerate(self.reward_func_names):
-            if self.tool_use:
+            if self.tool_saving:
                 mean_rewards = torch.nanmean(rewards_per_func_global[:, i]).item()
                 std_rewards = nanstd(rewards_per_func_global[:, i]).item()
             else:
@@ -1512,7 +1511,7 @@ class GRPOTrainer(Trainer):
         self._textual_logs["prompt"].extend(prompts_text[:self.maxlen])
         self._textual_logs["completion"].extend(completions_text[:self.maxlen])
         if "solution" in inputs[0]:
-            if self.tool_use:
+            if self.tool_saving:
                 sols = [
                     inputs[local_i]['solution'] for local_i, i in enumerate(pidx) for _ in saving_idx_map[i]
                 ] + [x["solution"] for x in inputs]
@@ -1520,7 +1519,7 @@ class GRPOTrainer(Trainer):
                 sols = [x["solution"] for x in inputs]
             self._textual_logs["solution"].extend(sols[:self.maxlen])
         if "domain" in inputs[0]:
-            if self.tool_use:
+            if self.tool_saving:
                 domains = [
                     inputs[local_i]['domain'] for local_i, i in enumerate(pidx) for _ in saving_idx_map[i]
                 ] + [x["domain"] for x in inputs]
@@ -1528,7 +1527,7 @@ class GRPOTrainer(Trainer):
                 domains = [x["domain"] for x in inputs]
             self._textual_logs["domain"].extend(domains[:self.maxlen])
         if "source" in inputs[0]:
-            if self.tool_use:
+            if self.tool_saving:
                 sources = [
                     inputs[local_i]['source'] for local_i, i in enumerate(pidx) for _ in saving_idx_map[i]
                 ] + [x["source"] for x in inputs]
@@ -1539,7 +1538,6 @@ class GRPOTrainer(Trainer):
             self._textual_logs["rewards"][name].extend(rewards_per_func[:, i].tolist()[:self.maxlen])
         self._textual_logs["advantages"].extend(advantages.tolist()[:self.maxlen])
 
-        # print("PRERETURN", self.accelerator.process_index, self.accelerator.num_processes)
         return {
             "prompt_ids": prompt_ids,
             "prompt_mask": prompt_mask,
