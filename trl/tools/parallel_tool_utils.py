@@ -302,10 +302,17 @@ def generate_with_tool_batch(
                 saving_completions_per_prompt[global_i].append(contexts[global_i][prompts_len[global_i]:] + args.eos_token)
                 saving_prompt_per_prompt[global_i].append(contexts[global_i][:prompts_len[global_i]])
 
-                add = f"{args.saving_tokens[0]}\n{summary}\n{args.saving_tokens[1]}\n{args.thinking_tokens[0]}\n"
-                add = f"{args.thinking_tokens[0]}\n{args.saving_tokens[0]}\n{summary}\n{args.saving_tokens[1]}\n"
-                add = f"{args.thinking_tokens[0]}\nContext: {summary}\n"                
-                contexts[global_i] = contexts[global_i][:prompts_len[global_i]] + add
+                # add = f"{args.saving_tokens[0]}\n{summary}\n{args.saving_tokens[1]}\n{args.thinking_tokens[0]}\n"
+                # add = f"{args.thinking_tokens[0]}\n{args.saving_tokens[0]}\n{summary}\n{args.saving_tokens[1]}\n"
+                # contexts[global_i] = contexts[global_i][:prompts_len[global_i]] + add
+
+                add = f"\n\nBuild on this context from your last attempt:\n{summary}<|im_end|>\n<|im_start|>assistant\n"
+                contexts[global_i] = contexts[global_i][:prompts_len[global_i] - len("<|im_end|>\n<|im_start|>assistant\n", "")] + add
+
+                
+
+
+
                 tokens_left[global_i] = args.max_completion_length - len(tokenizer(add).input_ids)
             else:
                 tool_jobs.append((global_i, deepcopy(detect), contexts[global_i], args, tokenizer))
