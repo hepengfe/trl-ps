@@ -184,6 +184,7 @@ def generate_with_tool_batch(
     args: GRPOConfig,
     llm: LLM = None,
     tokenizer = None,
+    force_saving: bool = False,
 ) -> Tuple[List[str], List[str], List[Dict[str, int]]]:
     """
     Parameters
@@ -221,6 +222,11 @@ def generate_with_tool_batch(
     ]
     malformed_tool_call_str = f"\n{args.result_tokens[0]}\n{args.result_tokens[1]}\n"
     malformed_tool_call_len = len(tokenizer(malformed_tool_call_str).input_ids)
+    saving_force_str = '\n<tool_call>\n{"name": "pass", "arguments": {"context": "'
+    saving_force_str_len = len(saving_force_str)
+    saving_force_len = len(tokenizer(saving_force_str).input_ids)
+    saving_force_budget = 256
+    saving_force_budget_net = saving_force_budget - saving_force_len
 
     step = 0
     while not all(done) and step < 20:
@@ -233,7 +239,7 @@ def generate_with_tool_batch(
             active_prompts,
             max_tokens=min(tokens_left[i] for i in active_idx),
             args=args,
-            stop=[args.result_tokens[0], args.eos_token],
+            stop=["</tool_call>", args.result_tokens[0], args.eos_token],
             llm=llm,
         )
 
@@ -241,13 +247,21 @@ def generate_with_tool_batch(
         tool_jobs = []
         for local_i, global_i in enumerate(active_idx):
             comp_ids = comp_ids_list[local_i]
+            comp_ids_len = len(comp_ids)
             comp_text = comp_text_list[local_i]
+            if (tokenizer.decode(comp_ids[-1]) == "</tool_call>"):
+                comp_text += "</tool_call>"
             prompt_idx = len(contexts[global_i])
             contexts[global_i] += comp_text
-            stats[global_i]["generated_tokens"] += len(comp_ids)
-            tokens_left[global_i] -= len(comp_ids)
+            stats[global_i]["generated_tokens"] += comp_ids_len
+            tokens_left[global_i] -= comp_ids_len
+
+            # To ensure tool call is detected
+            if force_saving:
+                prompt_idx = max(0, prompt_idx - saving_force_str_len)
 
             detect = _detect_tool_use(contexts[global_i], prompt_idx=prompt_idx)
+            import pdb; pdb.set_trace()
             if detect["error_tool_use"]:
                 stats[global_i]["num_tool_detect_error"] += 1
                 print(f"[{global_i}] malformed tool call – skipping tool use.")
@@ -264,15 +278,24 @@ def generate_with_tool_batch(
                     contexts[global_i] += args.eos_token
                     done[global_i] = True
                 elif tokens_left[global_i] <= 0:
-                    done[global_i] = True
+                    # len should be less than the total ctxt window budget
+                    if (force_saving) and (comp_ids_len <= args.max_completion_length + saving_force_budget):
+                        # Force saving tool call
+                        contexts[global_i] += saving_force_str
+                        tokens_left[global_i] += saving_force_budget_net
+                        stats[global_i]["generated_tokens"] += saving_force_len                        
+                    else:
+                        done[global_i] = True
                 continue
             tool_type = detect["tool_type"]
 
-            if tool_type == "saving":
+            if tool_type in ["saving", "pass"]:
                 stats[global_i]["num_saving"] += 1
-                try:
+                if "summary" in detect.get("tool_argument", {}):
                     summary = detect["tool_argument"]["summary"]
-                except:
+                elif "context" in detect.get("tool_argument", {}):
+                    summary = detect["tool_argument"]["context"]
+                else:
                     summary = ""
                     stats[global_i]["num_saving_exec_error"] += 1
 
@@ -280,13 +303,15 @@ def generate_with_tool_batch(
                 saving_prompt_per_prompt[global_i].append(contexts[global_i][:prompts_len[global_i]])
 
                 add = f"{args.saving_tokens[0]}\n{summary}\n{args.saving_tokens[1]}\n{args.thinking_tokens[0]}\n"
+                add = f"{args.thinking_tokens[0]}\n{args.saving_tokens[0]}\n{summary}\n{args.saving_tokens[1]}\n"
+                add = f"{args.thinking_tokens[0]}\nContext: {summary}\n"                
                 contexts[global_i] = contexts[global_i][:prompts_len[global_i]] + add
                 tokens_left[global_i] = args.max_completion_length - len(tokenizer(add).input_ids)
             else:
                 tool_jobs.append((global_i, deepcopy(detect), contexts[global_i], args, tokenizer))
 
-        tool_start = time.time()
         if tool_jobs:
+            tool_start = time.time()
             with ProcessPoolExecutor(max_workers=min(len(tool_jobs), os.cpu_count())) as executor:
                 results = list(executor.map(_execute_tool_job, tool_jobs))
 
