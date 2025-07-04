@@ -229,7 +229,7 @@ def generate_with_tool_batch(
     saving_force_budget_net = saving_force_budget - saving_force_len
 
     step = 0
-    while not all(done) and step < 100:
+    while not all(done) and step < 15:
         step += 1
         active_idx = [i for i, d in enumerate(done) if not d and tokens_left[i] > 0]
         if len(active_idx) == 0: break
@@ -252,13 +252,13 @@ def generate_with_tool_batch(
             stop_token = tokenizer.decode(comp_ids[-1])
             if stop_token == "</tool_call>":
                 comp_text += "</tool_call>"
-            prompt_idx = len(contexts[global_i])
             contexts[global_i] += comp_text
             stats[global_i]["generated_tokens"] += comp_ids_len
             tokens_left[global_i] -= comp_ids_len
 
-            detect = _detect_tool_use(contexts[global_i], prompt_idx=prompt_idx)
-            if (detect["error_tool_use"]):
+            detect = _detect_tool_use(contexts[global_i])
+            import pdb; pdb.set_trace()
+            if detect["error_tool_use"]:
                 stats[global_i]["num_tool_detect_error"] += 1
                 print(f"[{global_i}] malformed tool call – skipping tool use.")
                 if tokens_left[global_i] > malformed_tool_call_len:
@@ -266,34 +266,36 @@ def generate_with_tool_batch(
                     tokens_left[global_i] -= malformed_tool_call_len
                     stats[global_i]["generated_tokens"] += malformed_tool_call_len
                 else:
+                    import pdb; pdb.set_trace()
                     done[global_i] = True
                 continue
 
             if not detect["tool_use"]:
-                if (stop_token == args.eos_token) and not(contexts[global_i].endswith(args.eos_token)):
+                if stop_token == args.eos_token:
                     contexts[global_i] += args.eos_token
                     done[global_i] = True
                     continue
                 elif tokens_left[global_i] <= 0:
-                    # len should be less than the total ctxt window budget
-                    if (force_saving) and (len(tokenizer(contexts[global_i][prompts_len[global_i]:]).input_ids) < args.max_completion_length + saving_force_budget):
-                        # Force saving tool call
-                        contexts[global_i] += saving_force_str
-                        tokens_left[global_i] += saving_force_budget_net
-                        stats[global_i]["generated_tokens"] += saving_force_len                        
-                    else:
-                        done[global_i] = True
-                    continue
-                else:
                     if force_saving:
-                        detect = _detect_tool_use(contexts[global_i], prompt_idx=prompts_len[global_i], force_end_tag=False)
-                        if not(detect["tool_use"] and detect["tool_type"] in ["saving", "pass"]):
+                        if len(tokenizer(contexts[global_i][prompts_len[global_i]:]).input_ids) < args.max_completion_length + saving_force_budget:
+                            # Force saving tool call
+                            contexts[global_i] += saving_force_str
+                            tokens_left[global_i] += saving_force_budget_net
+                            stats[global_i]["generated_tokens"] += saving_force_len
                             continue
                         else:
-                            print("Continuing with broken saving tool call.")
-                            import pdb; pdb.set_trace()
+                            # In case it ran out of context while calling the tool
+                            detect = _detect_tool_use(contexts[global_i], prompt_idx=prompts_len[global_i], force_end_tag=False)
+                            if not(detect["tool_use"] and detect["tool_type"] in ["saving", "pass"]):
+                                import pdb; pdb.set_trace()
+                                continue
+                            else:
+                                print("Continuing with broken saving tool call.")
                     else:
+                        done[global_i] = True
                         continue
+                else:
+                    continue
             tool_type = detect["tool_type"]
 
             if tool_type in ["saving", "pass"]:
@@ -342,7 +344,7 @@ def generate_with_tool_batch(
                     stats[global_i]["num_retrieval"] += 1
                     if exec_error:
                         stats[global_i]["num_retriever_exec_error"] += 1
-        
+
             tool_duration = time.time() - tool_start
             print(f"[Time] {tool_duration:.2f} seconds for {len(tool_jobs)} parallel tool calls. Avg {tool_duration / len(tool_jobs):.2f} seconds.")
 
@@ -373,7 +375,9 @@ def generate_with_tool_batch(
         toks_len = len(toks)
         if toks_len > args.max_completion_length + saving_force_budget:
             completions_to_return[i] = tokenizer.decode(toks[:args.max_completion_length + saving_force_budget])
-            print(f"[WARNING] Truncated completion {i} to fit max length: {toks_len} -> {len(completions_to_return[i])}")
+            toks_len_new = len(tokenizer(completions_to_return[i]).input_ids)
+            print(f"[WARNING] Truncated completion {i} to fit max length: {toks_len} -> {toks_len_new}")
 
-    print("Finished in {step} steps.")
+    print(f"Finished in {step} steps.")
+    import pdb; pdb.set_trace()
     return prompts_to_return, completions_to_return, stats

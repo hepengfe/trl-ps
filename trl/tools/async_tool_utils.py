@@ -42,7 +42,7 @@ def _make_tool_inference_requests(
         raise Exception(f"Request failed: {response.status_code}, {response.text}")
 
 
-def _detect_tool_use(context: str, prompt_idx: int, force_end_tag=True) -> dict:
+def _detect_tool_use(context: str, prompt_idx: int = 0, force_end_tag = True) -> dict:
     """
     Detect tool usage in a generation context. Extracts:
     - Python code, Retrieval query or Saved summary
@@ -65,27 +65,6 @@ def _detect_tool_use(context: str, prompt_idx: int, force_end_tag=True) -> dict:
     }
     start_tag = "<tool_call>"
     end_tag = "</tool_call>"
-    response_tag = "</tool_response>"
-
-    # generated = context[prompt_idx:]
-    
-    # # Find the last occurrence of tool calling
-    # start = generated.rfind(start_tag)
-    # # no tool call detected
-    # if start == -1: return result
-
-    # # Find the last occurrence of tool result
-    # last_response_idx = generated.rfind(response_tag, start)    
-    # # last tool call is processed
-    # if start != -1 and last_response_idx != -1: return result
-
-    # end = generated.rfind(end_tag, start)
-    # # If no end then likely it was stopped in the middle of writing out
-    # # the tool call i.e. let it continue
-    # if end == -1: return result
-    # tool_call_raw = generated[start + len(start_tag):end].strip()
-    
-    # start += prompt_idx # Make it global i.e. full context index
 
     if force_end_tag:
         if not context.endswith(end_tag): return result
@@ -93,11 +72,11 @@ def _detect_tool_use(context: str, prompt_idx: int, force_end_tag=True) -> dict:
         if start == -1: return result
         tool_call_raw = context[start + len(start_tag):-len(end_tag)].strip()
     else:
-        start = context.rfind(start_tag, prompt_idx)
+        start = context.rfind(start_tag, prompt_idx) # produces a global index
         if start == -1: return result
         tool_call_raw = context[start + len(start_tag):].strip()
 
-    try:            
+    try:
         parsed = json.loads(tool_call_raw)
         result = {
             "tool_use": True,
@@ -143,7 +122,17 @@ def _detect_tool_use(context: str, prompt_idx: int, force_end_tag=True) -> dict:
             "tool_argument": {"context": saving_match.group(1)},
             "error_tool_use": False,
             "tool_start_idx": start,
-        }        
+        }
+    elif (match := tool_call_raw.rfind('context": "')) != -1:
+        # e.g. {"name": "saving", "arguments": {"context": "some context....
+        # but model ran out of context window
+        result = {
+            "tool_use": True,
+            "tool_type": "saving",
+            "tool_argument": {"context": tool_call_raw[match + len('context": "'):]},
+            "error_tool_use": False,
+            "tool_start_idx": start,
+        }
     else:
         result = {
             "tool_use": True,
