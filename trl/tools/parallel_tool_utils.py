@@ -229,7 +229,7 @@ def generate_with_tool_batch(
     saving_force_budget_net = saving_force_budget - saving_force_len
 
     step = 0
-    while not all(done) and step < 15:
+    while not all(done) and step < 100:
         step += 1
         active_idx = [i for i, d in enumerate(done) if not d and tokens_left[i] > 0]
         if len(active_idx) == 0: break
@@ -257,7 +257,6 @@ def generate_with_tool_batch(
             tokens_left[global_i] -= comp_ids_len
 
             detect = _detect_tool_use(contexts[global_i])
-            import pdb; pdb.set_trace()
             if detect["error_tool_use"]:
                 stats[global_i]["num_tool_detect_error"] += 1
                 print(f"[{global_i}] malformed tool call – skipping tool use.")
@@ -266,7 +265,6 @@ def generate_with_tool_batch(
                     tokens_left[global_i] -= malformed_tool_call_len
                     stats[global_i]["generated_tokens"] += malformed_tool_call_len
                 else:
-                    import pdb; pdb.set_trace()
                     done[global_i] = True
                 continue
 
@@ -277,7 +275,10 @@ def generate_with_tool_batch(
                     continue
                 elif tokens_left[global_i] <= 0:
                     if force_saving:
-                        if len(tokenizer(contexts[global_i][prompts_len[global_i]:]).input_ids) < args.max_completion_length + saving_force_budget:
+                        # There can be some issues due to tokenizer non-determinism (see bottom)
+                        # thus we check for args.max_completion_length + saving_force_len even though it has
+                        # args.max_completion_length + saving_force_budget_net of budget to be more conservative
+                        if len(tokenizer(contexts[global_i][prompts_len[global_i]:]).input_ids) < args.max_completion_length + saving_force_len:
                             # Force saving tool call
                             contexts[global_i] += saving_force_str
                             tokens_left[global_i] += saving_force_budget_net
@@ -287,7 +288,6 @@ def generate_with_tool_batch(
                             # In case it ran out of context while calling the tool
                             detect = _detect_tool_use(contexts[global_i], prompt_idx=prompts_len[global_i], force_end_tag=False)
                             if not(detect["tool_use"] and detect["tool_type"] in ["saving", "pass"]):
-                                import pdb; pdb.set_trace()
                                 continue
                             else:
                                 print("Continuing with broken saving tool call.")
