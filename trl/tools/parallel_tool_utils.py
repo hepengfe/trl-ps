@@ -222,7 +222,7 @@ def generate_with_tool_batch(
     ]
     malformed_tool_call_str = f"\n{args.result_tokens[0]}\n{args.result_tokens[1]}\n"
     malformed_tool_call_len = len(tokenizer(malformed_tool_call_str).input_ids)
-    saving_force_str = '\n<tool_call>\n{"name": "pass", "arguments": {"context": "'
+    saving_force_str = '\n' + args.tool_tokens[0] + '\n{"name": "pass", "arguments": {"context": "'
     saving_force_str_len = len(saving_force_str)
     saving_force_len = len(tokenizer(saving_force_str).input_ids)
     saving_force_budget = 256 if force_saving else 0
@@ -239,7 +239,7 @@ def generate_with_tool_batch(
             active_prompts,
             max_tokens=min(tokens_left[i] for i in active_idx),
             args=args,
-            stop=["</tool_call>", args.result_tokens[0], args.eos_token],
+            stop=[args.tool_tokens[1], args.eos_token],
             llm=llm,
         )
 
@@ -250,8 +250,8 @@ def generate_with_tool_batch(
             comp_ids_len = len(comp_ids)
             comp_text = comp_text_list[local_i]
             stop_token = tokenizer.decode(comp_ids[-1])
-            if stop_token == "</tool_call>":
-                comp_text += "</tool_call>"
+            if stop_token == args.tool_tokens[1]:
+                comp_text += args.tool_tokens[1]
             contexts[global_i] += comp_text
             stats[global_i]["generated_tokens"] += comp_ids_len
             tokens_left[global_i] -= comp_ids_len
