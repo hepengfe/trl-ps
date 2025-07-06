@@ -301,8 +301,9 @@ def generate_with_tool_batch(
             tool_type = detect["tool_type"]
 
             if tool_type in ["saving", "pass"]:
-                done = [True if stats[global_i]["num_saving"] == max_saving else d for d in done]
-                if done[global_i]: continue
+                if stats[global_i]["num_saving"] >= max_saving:
+                    done[global_i] = True
+                    continue
                 stats[global_i]["num_saving"] += 1
 
                 if "summary" in detect.get("tool_argument", {}):
@@ -317,12 +318,12 @@ def generate_with_tool_batch(
                 saving_prompt_per_prompt[global_i].append(contexts[global_i][:prompts_len[global_i]])
 
                 ### Prompt 1 ###
-                # add = f"{args.thinking_tokens[0]}\n{summary}\n"
-                # contexts[global_i] = contexts[global_i][:prompts_len[global_i]] + add
+                add = f"{args.thinking_tokens[0]}\n{summary}\n"
+                contexts[global_i] = contexts[global_i][:prompts_len[global_i]] + add
                 ### Prompt 2 ###
                 # add = f"\n\nBuild on this context from your last attempt:\n{summary}<|im_end|>\n<|im_start|>assistant\n{args.thinking_tokens[0]}"
-                add = f"\n\nContext:\n{summary}<|im_end|>\n<|im_start|>assistant\n{args.thinking_tokens[0]}"
-                contexts[global_i] = contexts[global_i][:prompts_len[global_i] - len("<|im_end|>\n<|im_start|>assistant\n")] + add
+                # add = f"\n\nContext:\n{summary}<|im_end|>\n<|im_start|>assistant\n{args.thinking_tokens[0]}"
+                # contexts[global_i] = contexts[global_i][:prompts_len[global_i] - len("<|im_end|>\n<|im_start|>assistant\n")] + add
                 ### Prompt 3 & 4 ###
                 # add = f"{args.saving_tokens[0]}\n{summary}\n{args.saving_tokens[1]}\n{args.thinking_tokens[0]}\n"
                 # add = f"{args.thinking_tokens[0]}\n{args.saving_tokens[0]}\n{summary}\n{args.saving_tokens[1]}\n"
@@ -390,6 +391,7 @@ def generate_with_tool_batch(
 
     print("Saving stats:", [stats[i]["num_saving"] for i in range(N)])
     print("Saving stats Avg:", sum(stats[i]["num_saving"] for i in range(N)) / N)
+    print("Max Saving %:", sum(stats[i]["num_saving"] == max_saving for i in range(N)) / N * 100)
     print("Generated tokens:", [stats[i]["generated_tokens"] for i in range(N)])
     print("Generated tokens Avg:", sum(stats[i]["generated_tokens"] for i in range(N)) / N)
     return prompts_to_return, completions_to_return, stats
