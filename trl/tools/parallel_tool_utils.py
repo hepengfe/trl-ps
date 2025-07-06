@@ -184,7 +184,8 @@ def generate_with_tool_batch(
     args: GRPOConfig,
     llm: LLM = None,
     tokenizer = None,
-    force_saving: bool = False,
+    force_saving: bool = True,
+    max_saving: int = 16,
 ) -> Tuple[List[str], List[str], List[Dict[str, int]]]:
     """
     Parameters
@@ -207,6 +208,7 @@ def generate_with_tool_batch(
     prompts_len = [len(p) for p in prompts]
     saving_prompt_per_prompt = [[] for _ in range(N)]
     saving_completions_per_prompt = [[] for _ in range(N)]
+    num_steps_per_prompt = [0] * N
     tokens_left = [args.max_completion_length] * N
     done = [False] * N
     stats = [
@@ -229,8 +231,7 @@ def generate_with_tool_batch(
     saving_force_budget_net = saving_force_budget - saving_force_len
 
     step = 0
-    while not all(done) and step < 100:
-        step += 1
+    while not all(done):
         active_idx = [i for i, d in enumerate(done) if not d and tokens_left[i] > 0]
         if len(active_idx) == 0: break
         active_prompts = [contexts[i] for i in active_idx]
@@ -272,6 +273,7 @@ def generate_with_tool_batch(
                 if stop_token == args.eos_token:
                     contexts[global_i] += args.eos_token
                     done[global_i] = True
+                    # import pdb; pdb.set_trace()
                     continue
                 elif tokens_left[global_i] <= 0:
                     if force_saving:
@@ -299,7 +301,10 @@ def generate_with_tool_batch(
             tool_type = detect["tool_type"]
 
             if tool_type in ["saving", "pass"]:
+                done = [True if stats[global_i]["num_saving"] == max_saving else d for d in done]
+                if done[global_i]: continue
                 stats[global_i]["num_saving"] += 1
+
                 if "summary" in detect.get("tool_argument", {}):
                     summary = detect["tool_argument"]["summary"]
                 elif "context" in detect.get("tool_argument", {}):
@@ -315,7 +320,8 @@ def generate_with_tool_batch(
                 # add = f"{args.thinking_tokens[0]}\n{summary}\n"
                 # contexts[global_i] = contexts[global_i][:prompts_len[global_i]] + add
                 ### Prompt 2 ###
-                add = f"\n\nBuild on this context from your last attempt:\n{summary}<|im_end|>\n<|im_start|>assistant\n"
+                # add = f"\n\nBuild on this context from your last attempt:\n{summary}<|im_end|>\n<|im_start|>assistant\n{args.thinking_tokens[0]}"
+                add = f"\n\nContext:\n{summary}<|im_end|>\n<|im_start|>assistant\n{args.thinking_tokens[0]}"
                 contexts[global_i] = contexts[global_i][:prompts_len[global_i] - len("<|im_end|>\n<|im_start|>assistant\n")] + add
                 ### Prompt 3 & 4 ###
                 # add = f"{args.saving_tokens[0]}\n{summary}\n{args.saving_tokens[1]}\n{args.thinking_tokens[0]}\n"
@@ -382,5 +388,8 @@ def generate_with_tool_batch(
             toks_len_new = len(tokenizer(completions_to_return[i]).input_ids)
             print(f"[WARNING] Truncated completion {i} to fit max length: {toks_len} -> {toks_len_new}")
 
-    print(f"Finished in {step} steps.")
+    print("Saving stats:", [stats[i]["num_saving"] for i in range(N)])
+    print("Saving stats Avg:", sum(stats[i]["num_saving"] for i in range(N)) / N)
+    print("Generated tokens:", [stats[i]["generated_tokens"] for i in range(N)])
+    print("Generated tokens Avg:", sum(stats[i]["generated_tokens"] for i in range(N)) / N)
     return prompts_to_return, completions_to_return, stats

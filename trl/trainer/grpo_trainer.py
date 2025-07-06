@@ -507,7 +507,7 @@ class GRPOTrainer(Trainer):
         self.use_vllm = args.use_vllm
         self.vllm_mode = args.vllm_mode
         self.tool_use = args.tool_use
-        self.tool_saving = False
+        self.tool_saving = True
         self.vllm_gpu_memory_utilization = args.vllm_gpu_memory_utilization  # only applies to colocation mode
         self.vllm_tensor_parallel_size = args.vllm_tensor_parallel_size  # only applies to colocation mode
         self.use_liger_loss = args.use_liger_loss
