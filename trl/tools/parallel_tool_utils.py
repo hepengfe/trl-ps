@@ -258,6 +258,7 @@ def generate_with_tool_batch(
             tokens_left[global_i] -= comp_ids_len
 
             detect = _detect_tool_use(contexts[global_i])
+            import pdb; pdb.set_trace()
             if detect["error_tool_use"]:
                 stats[global_i]["num_tool_detect_error"] += 1
                 print(f"[{global_i}] malformed tool call – skipping tool use.")
