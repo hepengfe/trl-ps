@@ -295,7 +295,6 @@ def generate_with_tool_batch(
                             else:
                                 print("Continuing with broken saving tool call.")
                     elif save_last_k is not None:
-                        import pdb; pdb.set_trace()
                         if stats[global_i]["num_saving"] >= max_saving:
                             done[global_i] = True
                             continue
@@ -336,7 +335,6 @@ def generate_with_tool_batch(
                 # add = f"{args.thinking_tokens[0]}\n{summary}\n"
                 # contexts[global_i] = contexts[global_i][:prompts_len[global_i]] + add
                 ### Prompt 2 ###
-                ## BUG: If doing this multiple times in a row, it wont work
                 # add = f"\n\nBuild on this context from your last attempt:\n{summary}<|im_end|>\n<|im_start|>assistant\n{args.thinking_tokens[0]}"
                 add = f"\n\nContext:\n{summary}<|im_end|>\n<|im_start|>assistant\n{args.thinking_tokens[0]}"
                 contexts[global_i] = contexts[global_i][:prompts_len[global_i] - len("<|im_end|>\n<|im_start|>assistant\n")] + add
