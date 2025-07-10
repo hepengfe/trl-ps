@@ -258,6 +258,9 @@ def generate_with_tool_batch(
             stats[global_i]["generated_tokens"] += comp_ids_len
             tokens_left[global_i] -= comp_ids_len
 
+            if contexts[global_i].count("<|im_start|>assistant") > 3:
+                import pdb; pdb.set_trace()
+
             detect = _detect_tool_use(contexts[global_i])
             if detect["error_tool_use"]:
                 stats[global_i]["num_tool_detect_error"] += 1
@@ -274,7 +277,6 @@ def generate_with_tool_batch(
                 if stop_token == args.eos_token:
                     contexts[global_i] += args.eos_token
                     done[global_i] = True
-                    # import pdb; pdb.set_trace()
                     continue
                 elif tokens_left[global_i] <= 0:
                     if force_saving:
@@ -336,12 +338,12 @@ def generate_with_tool_batch(
                 # contexts[global_i] = contexts[global_i][:prompts_len[global_i]] + add
                 ### Prompt 2 ###
                 # add = f"\n\nBuild on this context from your last attempt:\n{summary}<|im_end|>\n<|im_start|>assistant\n{args.thinking_tokens[0]}"
-                add = f"\n\nContext:\n{summary}<|im_end|>\n<|im_start|>assistant\n{args.thinking_tokens[0]}"
-                contexts[global_i] = contexts[global_i][:prompts_len[global_i] - len("<|im_end|>\n<|im_start|>assistant\n")] + add
+                # add = f"\n\nContext:\n{summary}<|im_end|>\n<|im_start|>assistant\n{args.thinking_tokens[0]}"
+                # contexts[global_i] = contexts[global_i][:prompts_len[global_i] - len("<|im_end|>\n<|im_start|>assistant\n")] + add
                 ### Prompt 3 & 4 ###
-                # add = f"{args.saving_tokens[0]}\n{summary}\n{args.saving_tokens[1]}\n{args.thinking_tokens[0]}\n"
+                add = f"{args.saving_tokens[0]}\n{summary}\n{args.saving_tokens[1]}\n{args.thinking_tokens[0]}\n"
                 # add = f"{args.thinking_tokens[0]}\n{args.saving_tokens[0]}\n{summary}\n{args.saving_tokens[1]}\n"
-                # contexts[global_i] = contexts[global_i][:prompts_len[global_i]] + add
+                contexts[global_i] = contexts[global_i][:prompts_len[global_i]] + add
 
                 tokens_left[global_i] = args.max_completion_length - len(tokenizer(add).input_ids)
             else:

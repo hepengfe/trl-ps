@@ -623,9 +623,23 @@ class GRPOConfig(TrainingArguments):
     )
     
     max_num_savings: int = field(
-        default=3,
+        default=16,
         metadata={
             "help": "Maximum number of summarization. Only keep the last summarization in thinking."
+        },
+    )
+
+    force_saving: bool = field(
+        default=False,
+        metadata={
+            "help": "Whether to force saving."
+        },
+    )
+
+    save_last_k: Optional[int] = field(
+        default=None,
+        metadata={
+            "help": "Whether to save last k tokens."
         },
     )
 

@@ -1044,7 +1044,7 @@ class GRPOTrainer(Trainer):
         if self.args.async_infer:
             return generate_with_tool_async(questions, self.args)
         else:
-            return generate_with_tool_batch(questions, self.args, tokenizer=self.processing_class)
+            return generate_with_tool_batch(questions, self.args, tokenizer=self.processing_class, force_saving=self.args.force_saving, save_last_k=self.args.save_last_k, max_saving=self.args.max_num_savings)
         
     def _build_tool_mask_for_token(self, mask: torch.Tensor, comp_ids: torch.Tensor, token_pair: List[str]) -> torch.Tensor:
         device = self.accelerator.device
