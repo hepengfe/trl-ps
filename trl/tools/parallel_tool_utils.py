@@ -284,6 +284,10 @@ def generate_with_tool_batch(
                         # thus we check for args.max_completion_length + saving_force_len even though it has
                         # args.max_completion_length + saving_force_budget_net of budget to be more conservative
                         if len(tokenizer(contexts[global_i][prompts_len[global_i]:]).input_ids) < args.max_completion_length + saving_force_len:
+                            # If it already used its last saving, give it the rest of the seq length
+                            if stats[global_i]["num_saving"] == max_saving:
+                                tokens_left[global_i] += saving_force_budget
+                                continue
                             # Force saving tool call
                             contexts[global_i] += saving_force_str
                             tokens_left[global_i] += saving_force_budget_net
@@ -297,6 +301,7 @@ def generate_with_tool_batch(
                             else:
                                 print("Continuing with broken saving tool call.")
                     elif save_last_k is not None:
+                        # Here it is fine to end directly as it has used the full sequence; no extra budget
                         if stats[global_i]["num_saving"] >= max_saving:
                             done[global_i] = True
                             continue
