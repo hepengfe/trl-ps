@@ -524,6 +524,13 @@ class GRPOConfig(TrainingArguments):
             "help": "Whether to include tool use in grpo training."
         },
     )
+
+    tool_saving: bool = field(
+        default=False,
+        metadata={
+            "help": "Whether to use saving in tool use. If set to True, will use saving in tool use."
+        },
+    )
     
     async_infer: bool = field(
         default=False,
