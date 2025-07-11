@@ -280,6 +280,7 @@ def generate_with_tool_batch(
                     continue
                 elif tokens_left[global_i] <= 0:
                     if force_saving:
+                        import pdb; pdb.set_trace()
                         # There can be some issues due to tokenizer non-determinism (see bottom)
                         # thus we check for args.max_completion_length + saving_force_len even though it has
                         # args.max_completion_length + saving_force_budget_net of budget to be more conservative
@@ -415,4 +416,5 @@ def generate_with_tool_batch(
     print("Max Saving %:", sum(stats[i]["num_saving"] == max_saving for i in range(N)) / N * 100)
     print("Generated tokens:", [stats[i]["generated_tokens"] for i in range(N)])
     print("Generated tokens Avg:", sum(stats[i]["generated_tokens"] for i in range(N)) / N)
+    import pdb; pdb.set_trace()
     return prompts_to_return, completions_to_return, stats
