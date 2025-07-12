@@ -355,6 +355,7 @@ def generate_with_tool_batch(
 
                 tokens_left[global_i] = args.max_completion_length - len(tokenizer(add).input_ids)
             else:
+                # TODO: Skip here if unknown tool type
                 tool_jobs.append((global_i, deepcopy(detect), contexts[global_i], args, tokenizer))
 
         if tool_jobs:
