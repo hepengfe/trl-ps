@@ -13,6 +13,7 @@
 # limitations under the License.
 import multiprocessing
 import os
+import time
 import textwrap
 import warnings
 from collections import defaultdict, deque
@@ -81,9 +82,25 @@ if is_wandb_available():
     import wandb
 
 
+READY_FILE = "/data/niklas/s2/open-r1/completion_ready_s26xx.signal"
 # What we call a reward function is a callable that takes a list of prompts and completions and returns a list of
 # rewards. When it's a string, it's a model ID, so it's loaded as a pretrained model.
 RewardFunc = Union[str, PreTrainedModel, Callable[[list, list], list[float]]]
+
+def exists_between(p, x, y):
+    # Find all indices where y appears
+    indices = [i for i, val in enumerate(p) if val == y]
+    
+    # Need at least two appearances of y
+    if len(indices) < 2:
+        return False
+
+    # Get the rightmost and 2nd rightmost appearances
+    rightmost = indices[-1]
+    second_rightmost = indices[-2]
+    
+    # Check if x appears in between
+    return x in p[second_rightmost + 1:rightmost]
 
 
 class RepeatSampler(Sampler):
@@ -1044,7 +1061,16 @@ class GRPOTrainer(Trainer):
         if self.args.async_infer:
             return generate_with_tool_async(questions, self.args)
         else:
-            return generate_with_tool_batch(questions, self.args, tokenizer=self.processing_class, force_saving=self.args.force_saving, save_last_k=self.args.save_last_k, max_saving=self.args.max_num_savings)
+            return generate_with_tool_batch(
+                questions,
+                self.args,
+                tokenizer=self.processing_class,
+                force_saving=self.args.force_saving,
+                save_last_k=self.args.save_last_k,
+                max_saving=self.args.max_num_savings,
+                saving_prompt=self.args.saving_prompt,
+                move_context_to_prompt=self.args.move_context_to_prompt,
+            )
         
     def _build_tool_mask_for_token(self, mask: torch.Tensor, comp_ids: torch.Tensor, token_pair: List[str]) -> torch.Tensor:
         device = self.accelerator.device
@@ -1081,7 +1107,8 @@ class GRPOTrainer(Trainer):
         """
         mask = torch.ones_like(comp_ids, dtype=torch.int)
         mask = self._build_tool_mask_for_token(mask, comp_ids, self.args.result_tokens)
-        mask = self._build_tool_mask_for_token(mask, comp_ids, self.args.saving_tokens)
+        if not self.args.move_context_to_prompt:
+            mask = self._build_tool_mask_for_token(mask, comp_ids, self.args.saving_tokens)
         return mask
 
 
@@ -1138,6 +1165,9 @@ class GRPOTrainer(Trainer):
                             with profiling_context(self, "vLLM.generate"):
                                 prompts, completions, tool_stats = self._generate_with_tool(all_prompts_text, 20)
 
+                            with open(READY_FILE, "w") as f:
+                                f.write("done")
+                            print("Main process done generating completions. Signal file created.")
                             completion_ids = self.processing_class(text=completions)["input_ids"]
                             prompt_ids, prompt_mask = self.processing_class(text=prompts).values()
                             n_prompts = [len(prompts)]
@@ -1160,7 +1190,13 @@ class GRPOTrainer(Trainer):
                             self._metrics[mode]["tools/num_saving_exec_error"].append(tool_stats["num_saving_exec_error"])
                             print("Tool stats", tool_stats)
                 else:
-                    completion_ids = [None] * len(all_prompts_text)
+                    completion_ids = [None] * len(all_prompts_text)                
+                    if self.tool_use:
+                        print("Waiting for main process to finish...")
+                        # Wait indefinitely until the signal file appears
+                        while not os.path.exists(READY_FILE):
+                            time.sleep(60)
+                        print("Signal file detected. Proceeding.")
                 self.accelerator.wait_for_everyone()
 
                 # Account for new saving prompts
@@ -1172,6 +1208,11 @@ class GRPOTrainer(Trainer):
                         completion_ids = [None] * n_prompts[0]
                         prompt_ids = [None] * n_prompts[0]
                         prompt_mask = [None] * n_prompts[0]
+
+                    if self.accelerator.is_main_process and os.path.exists(READY_FILE):
+                        os.remove(READY_FILE)
+                        print("Signal file removed.")
+
 
                 # Broadcast the completions from the main process to all processes, ensuring each process receives its
                 # corresponding slice.                
@@ -1185,29 +1226,44 @@ class GRPOTrainer(Trainer):
                 completion_ids = completion_ids_all[-n_global_prompts:][process_slice]
                 # Add saving prompts which are prepended to the completions
                 if self.tool_use:
+                    prompt_ids_all = broadcast_object_list(prompt_ids, from_process=0)
                     # Create dict mapping from prompt idx to all saving idx for it
                     saving_idx_map = {i: [] for i in range(n_global_prompts)}
                     if self.tool_saving:
                         idx = 0
                         n_savings = len(completion_ids_all) - n_global_prompts
+
                         while idx < n_savings:
-                            for i, c in enumerate(completion_ids_all[-n_global_prompts:]): # Iterate through final completions
-                                # Check if continuation has saving
-                                if self.processing_class.convert_tokens_to_ids(self.args.saving_tokens[0]) in c:
-                                    # Check how many savings
-                                    saving_idx_map[i].append(idx) # first one has no saving token but the tool call e.g. <tool_call>\n{"name": "saving", "arguments": {...
-                                    idx += 1
-                                    if idx >= n_savings: break
-                                    while self.processing_class.convert_tokens_to_ids(self.args.saving_tokens[0]) in completion_ids_all[idx]:
-                                        saving_idx_map[i].append(idx)
+                            if self.args.move_context_to_prompt:
+                                for i, p in enumerate(prompt_ids_all[-n_global_prompts:]): # Iterate through final completions
+                                    # Check if continuation has saving
+                                    if exists_between(p, self.processing_class.convert_tokens_to_ids("<|im_start|>"), self.processing_class.convert_tokens_to_ids("Context")):
+                                        # Check how many savings
+                                        saving_idx_map[i].append(idx) # first one has no saving token but the tool call e.g. <tool_call>\n{"name": "saving", "arguments": {...
                                         idx += 1
                                         if idx >= n_savings: break
+                                        while exists_between(prompt_ids_all[idx], self.processing_class.convert_tokens_to_ids("<|im_start|>"), self.processing_class.convert_tokens_to_ids("Context")):
+                                            saving_idx_map[i].append(idx)
+                                            idx += 1
+                                            if idx >= n_savings: break
+                            else:
+                                for i, c in enumerate(completion_ids_all[-n_global_prompts:]): # Iterate through final completions
+                                    # Check if continuation has saving
+                                    if self.processing_class.convert_tokens_to_ids(self.args.saving_tokens[0]) in c:
+                                        # Check how many savings
+                                        saving_idx_map[i].append(idx) # first one has no saving token but the tool call e.g. <tool_call>\n{"name": "saving", "arguments": {...
+                                        idx += 1
+                                        if idx >= n_savings: break
+                                        while self.processing_class.convert_tokens_to_ids(self.args.saving_tokens[0]) in completion_ids_all[idx]:
+                                            saving_idx_map[i].append(idx)
+                                            idx += 1
+                                            if idx >= n_savings: break
+
 
                     pidx = list(range(self.accelerator.process_index * n_local_prompts, (self.accelerator.process_index + 1) * n_local_prompts))
 
                     completion_ids = [completion_ids_all[j] for i in pidx for j in saving_idx_map[i]] + completion_ids
-                                    
-                    prompt_ids_all = broadcast_object_list(prompt_ids, from_process=0)
+
                     prompt_ids = [prompt_ids_all[j] for i in pidx for j in saving_idx_map[i]] + prompt_ids_all[-n_global_prompts:][process_slice]
 
                     prompt_mask_all = broadcast_object_list(prompt_mask, from_process=0)

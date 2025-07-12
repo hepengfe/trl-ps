@@ -650,6 +650,20 @@ class GRPOConfig(TrainingArguments):
         },
     )
 
+    saving_prompt: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": "Prompt for summarization in tool use."
+        },
+    )
+
+    move_context_to_prompt: bool = field(
+        default=False,
+        metadata={
+            "help": "Whether to move the context to the prompt in tool use."
+        },
+    )
+
     def __post_init__(self):
         super().__post_init__()
 

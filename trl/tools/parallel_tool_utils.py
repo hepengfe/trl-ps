@@ -188,6 +188,8 @@ def generate_with_tool_batch(
     max_saving: int = 15,
     save_last_k: Optional[int] = 256,
     saving_prompt = None,
+    move_context_to_prompt: bool = False,
+    use_max: bool = False,
 ) -> Tuple[List[str], List[str], List[Dict[str, int]]]:
     """
     Parameters
@@ -239,13 +241,27 @@ def generate_with_tool_batch(
         if len(active_idx) == 0: break
         active_prompts = [contexts[i] for i in active_idx]
 
-        comp_ids_list, comp_text_list = _make_tool_inference_requests_batch(
-            active_prompts,
-            max_tokens=min(tokens_left[i] for i in active_idx),
-            args=args,
-            stop=[args.tool_tokens[1], args.eos_token],
-            llm=llm,
-        )
+        if use_max:
+            tokens_left_active = [tokens_left[i] for i in active_idx]
+            comp_ids_list, comp_text_list = _make_tool_inference_requests_batch(
+                active_prompts,
+                max_tokens=max(tokens_left_active),
+                args=args,
+                stop=[args.tool_tokens[1], args.eos_token],
+                llm=llm,
+            )
+            comp_ids_list = [
+                comp_ids[:max_tokens] for comp_ids, max_tokens in zip(comp_ids_list, tokens_left_active)
+            ]
+            comp_text_list = tokenizer.batch_decode(comp_ids_list)
+        else:
+            comp_ids_list, comp_text_list = _make_tool_inference_requests_batch(
+                active_prompts,
+                max_tokens=min(tokens_left[i] for i in active_idx),
+                args=args,
+                stop=[args.tool_tokens[1], args.eos_token],
+                llm=llm,
+            )
 
         # Update contexts and detect tool use
         tool_jobs = []
@@ -254,7 +270,7 @@ def generate_with_tool_batch(
             comp_ids_len = len(comp_ids)
             comp_text = comp_text_list[local_i]
             stop_token = tokenizer.decode(comp_ids[-1])
-            if stop_token == args.tool_tokens[1]:
+            if (stop_token == args.tool_tokens[1]) and not(comp_text.endswith(args.tool_tokens[1])):
                 comp_text += args.tool_tokens[1]
             contexts[global_i] += comp_text
             stats[global_i]["generated_tokens"] += comp_ids_len
@@ -274,7 +290,8 @@ def generate_with_tool_batch(
 
             if not detect["tool_use"]:
                 if stop_token == args.eos_token:
-                    contexts[global_i] += args.eos_token
+                    if not(contexts[global_i].endswith(args.eos_token)):
+                        contexts[global_i] += args.eos_token
                     done[global_i] = True
                     continue
                 elif tokens_left[global_i] <= 0:
@@ -340,22 +357,37 @@ def generate_with_tool_batch(
                 if saving_prompt is None:
                     add = f"{args.thinking_tokens[0]}\n{summary}\n"
                     contexts[global_i] = contexts[global_i][:prompts_len[global_i]] + add
+                    toks = len(tokenizer(add).input_ids)
                 # elif saving_prompt == "2":
                 #     add = f"\n\nBuild on this context from your last attempt:\n{summary}<|im_end|>\n<|im_start|>assistant\n{args.thinking_tokens[0]}"
                 #     contexts[global_i] = contexts[global_i][:prompts_len[global_i] - len("<|im_end|>\n<|im_start|>assistant\n")] + add
                 elif saving_prompt == "context":
                     add = f"\n\nContext:\n{summary}<|im_end|>\n<|im_start|>assistant\n{args.thinking_tokens[0]}"
                     contexts[global_i] = contexts[global_i][:prompts_len[global_i] - len("<|im_end|>\n<|im_start|>assistant\n")] + add
+                    toks = len(tokenizer(add).input_ids) - 5 # <|im_end|>\n<|im_start|>assistant\n
                 elif saving_prompt == "special_before_thinking":
                     add = f"{args.saving_tokens[0]}\n{summary}\n{args.saving_tokens[1]}\n{args.thinking_tokens[0]}\n"
                     contexts[global_i] = contexts[global_i][:prompts_len[global_i]] + add
+                    toks = len(tokenizer(add).input_ids)
                 elif saving_prompt == "special_after_thinking":
                     add = f"{args.thinking_tokens[0]}\n{args.saving_tokens[0]}\n{summary}\n{args.saving_tokens[1]}\n"
                     contexts[global_i] = contexts[global_i][:prompts_len[global_i]] + add
+                    toks = len(tokenizer(add).input_ids)
+                else:
+                    raise ValueError(f"Unknown saving_prompt: {saving_prompt}")
 
-                tokens_left[global_i] = args.max_completion_length - len(tokenizer(add).input_ids)
+                tokens_left[global_i] = args.max_completion_length - toks
             else:
-                # TODO: Skip here if unknown tool type
+                if tool_type not in ("python", "retrieval", "retrieve"):
+                    print(f"[{global_i}] Unknown tool type: {tool_type}. Skipping tool use.")
+                    stats[global_i]["num_tool_detect_error"] += 1
+                    if tokens_left[global_i] > malformed_tool_call_len:
+                        contexts[global_i] += malformed_tool_call_str
+                        tokens_left[global_i] -= malformed_tool_call_len
+                        stats[global_i]["generated_tokens"] += malformed_tool_call_len
+                    else:
+                        done[global_i] = True
+                    continue
                 tool_jobs.append((global_i, deepcopy(detect), contexts[global_i], args, tokenizer))
 
         if tool_jobs:
@@ -388,12 +420,24 @@ def generate_with_tool_batch(
     completions_to_return: List[str] = []
 
     for i in range(N):
+        # TODO: Maybe allow splitting prompts here
         prompts_to_return.extend(saving_prompt_per_prompt[i])
         completions_to_return.extend(saving_completions_per_prompt[i])
         
-    prompts_to_return.extend(prompts)
+    # prompts_to_return.extend(prompts)
     for i, context in enumerate(contexts):
         completions_to_return.append(context[prompts_len[i]:])
+        prompts_to_return.append(context[:prompts_len[i]])
+
+    if move_context_to_prompt:
+        for i in range(len(prompts_to_return)):
+            p, c = prompts_to_return[i], completions_to_return[i]
+            if (a_start := c.find("<|im_end|>\n<|im_start|>assistant\n")) != -1:
+                # Add it to p instead
+                p += c[:a_start + len("<|im_end|>\n<|im_start|>assistant\n")]
+                c = c[a_start + len("<|im_end|>\n<|im_start|>assistant\n"):]
+                prompts_to_return[i] = p
+                completions_to_return[i] = c
 
     # if any(len(tokenizer(c).input_ids) > args.max_completion_length for c in completions_to_return):
     #     import pdb; pdb.set_trace()

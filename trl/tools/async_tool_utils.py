@@ -87,10 +87,11 @@ def _detect_tool_use(context: str, prompt_idx: int = 0, force_end_tag = True) ->
         }
         return result
     except Exception as e: # json.JSONDecodeError or UnicodeDecodeError
-        print(f"Failed to parse {tool_call_raw} due to {e}")
+        pass
+        # print(f"Failed to parse {tool_call_raw} due to {e}")
 
     # if json parsing fails, fall back to regex
-    print("Using regex to capture tool call.")
+    # print("Using regex to capture tool call.")
     if (code_match := re.search(r'"code"\s*:\s*"(.+?)"\s*}', tool_call_raw, re.DOTALL)):
         result = {
             "tool_use": True,
