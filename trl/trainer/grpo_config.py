@@ -664,6 +664,13 @@ class GRPOConfig(TrainingArguments):
         },
     )
 
+    use_max: bool = field(
+        default=False,
+        metadata={
+            "help": "Whether to use max in tool use to maybe be faster."
+        },
+    )
+
     def __post_init__(self):
         super().__post_init__()
 
