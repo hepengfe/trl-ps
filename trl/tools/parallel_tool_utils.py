@@ -185,8 +185,9 @@ def generate_with_tool_batch(
     llm: LLM = None,
     tokenizer = None,
     force_saving: bool = False,
-    max_saving: int = 16,
+    max_saving: int = 15,
     save_last_k: Optional[int] = 256,
+    saving_prompt = None,
 ) -> Tuple[List[str], List[str], List[Dict[str, int]]]:
     """
     Parameters
@@ -233,6 +234,7 @@ def generate_with_tool_batch(
 
     step = 0
     while not all(done):
+        step += 1
         active_idx = [i for i, d in enumerate(done) if not d and tokens_left[i] > 0]
         if len(active_idx) == 0: break
         active_prompts = [contexts[i] for i in active_idx]
@@ -258,9 +260,6 @@ def generate_with_tool_batch(
             stats[global_i]["generated_tokens"] += comp_ids_len
             tokens_left[global_i] -= comp_ids_len
 
-            if contexts[global_i].count("<|im_start|>assistant") > 3:
-                import pdb; pdb.set_trace()
-
             detect = _detect_tool_use(contexts[global_i])
             if detect["error_tool_use"]:
                 stats[global_i]["num_tool_detect_error"] += 1
@@ -280,7 +279,6 @@ def generate_with_tool_batch(
                     continue
                 elif tokens_left[global_i] <= 0:
                     if force_saving:
-                        import pdb; pdb.set_trace()
                         # There can be some issues due to tokenizer non-determinism (see bottom)
                         # thus we check for args.max_completion_length + saving_force_len even though it has
                         # args.max_completion_length + saving_force_budget_net of budget to be more conservative
@@ -339,17 +337,21 @@ def generate_with_tool_batch(
                 saving_completions_per_prompt[global_i].append(contexts[global_i][prompts_len[global_i]:] + args.eos_token)
                 saving_prompt_per_prompt[global_i].append(contexts[global_i][:prompts_len[global_i]])
 
-                ### Prompt 1 ###
-                # add = f"{args.thinking_tokens[0]}\n{summary}\n"
-                # contexts[global_i] = contexts[global_i][:prompts_len[global_i]] + add
-                ### Prompt 2 ###
-                # add = f"\n\nBuild on this context from your last attempt:\n{summary}<|im_end|>\n<|im_start|>assistant\n{args.thinking_tokens[0]}"
-                # add = f"\n\nContext:\n{summary}<|im_end|>\n<|im_start|>assistant\n{args.thinking_tokens[0]}"
-                # contexts[global_i] = contexts[global_i][:prompts_len[global_i] - len("<|im_end|>\n<|im_start|>assistant\n")] + add
-                ### Prompt 3 & 4 ###
-                add = f"{args.saving_tokens[0]}\n{summary}\n{args.saving_tokens[1]}\n{args.thinking_tokens[0]}\n"
-                # add = f"{args.thinking_tokens[0]}\n{args.saving_tokens[0]}\n{summary}\n{args.saving_tokens[1]}\n"
-                contexts[global_i] = contexts[global_i][:prompts_len[global_i]] + add
+                if saving_prompt is None:
+                    add = f"{args.thinking_tokens[0]}\n{summary}\n"
+                    contexts[global_i] = contexts[global_i][:prompts_len[global_i]] + add
+                # elif saving_prompt == "2":
+                #     add = f"\n\nBuild on this context from your last attempt:\n{summary}<|im_end|>\n<|im_start|>assistant\n{args.thinking_tokens[0]}"
+                #     contexts[global_i] = contexts[global_i][:prompts_len[global_i] - len("<|im_end|>\n<|im_start|>assistant\n")] + add
+                elif saving_prompt == "context":
+                    add = f"\n\nContext:\n{summary}<|im_end|>\n<|im_start|>assistant\n{args.thinking_tokens[0]}"
+                    contexts[global_i] = contexts[global_i][:prompts_len[global_i] - len("<|im_end|>\n<|im_start|>assistant\n")] + add
+                elif saving_prompt == "special_before_thinking":
+                    add = f"{args.saving_tokens[0]}\n{summary}\n{args.saving_tokens[1]}\n{args.thinking_tokens[0]}\n"
+                    contexts[global_i] = contexts[global_i][:prompts_len[global_i]] + add
+                elif saving_prompt == "special_after_thinking":
+                    add = f"{args.thinking_tokens[0]}\n{args.saving_tokens[0]}\n{summary}\n{args.saving_tokens[1]}\n"
+                    contexts[global_i] = contexts[global_i][:prompts_len[global_i]] + add
 
                 tokens_left[global_i] = args.max_completion_length - len(tokenizer(add).input_ids)
             else:
@@ -416,5 +418,5 @@ def generate_with_tool_batch(
     print("Max Saving %:", sum(stats[i]["num_saving"] == max_saving for i in range(N)) / N * 100)
     print("Generated tokens:", [stats[i]["generated_tokens"] for i in range(N)])
     print("Generated tokens Avg:", sum(stats[i]["generated_tokens"] for i in range(N)) / N)
-    import pdb; pdb.set_trace()
+    print("Steps total:", step)
     return prompts_to_return, completions_to_return, stats
