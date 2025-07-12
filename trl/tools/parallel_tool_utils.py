@@ -189,7 +189,7 @@ def generate_with_tool_batch(
     save_last_k: Optional[int] = 256,
     saving_prompt = None,
     move_context_to_prompt: bool = False,
-    use_max: bool = True,
+    use_max: bool = False,
 ) -> Tuple[List[str], List[str], List[Dict[str, int]]]:
     """
     Parameters
