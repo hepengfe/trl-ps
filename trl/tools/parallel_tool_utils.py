@@ -242,6 +242,7 @@ def generate_with_tool_batch(
         active_prompts = [contexts[i] for i in active_idx]
 
         if use_max:
+            # ~2x faster with 1x saving
             tokens_left_active = [tokens_left[i] for i in active_idx]
             comp_ids_list, comp_text_list = _make_tool_inference_requests_batch(
                 active_prompts,
