@@ -671,6 +671,13 @@ class GRPOConfig(TrainingArguments):
         },
     )
 
+    mask_out_forcing: bool = field(
+        default=False,
+        metadata={
+            "help": "Whether to mask out the forcing tokens in tool use."
+        },
+    )
+
     def __post_init__(self):
         super().__post_init__()
 

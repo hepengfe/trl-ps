@@ -82,7 +82,11 @@ if is_wandb_available():
     import wandb
 
 
-READY_FILE = "./completion_ready_s27xx.signal"
+# READY_FILE = "./completion_ready_s28.signal"
+# Make it time-based
+import datetime
+READY_FILE = f"./completion_ready_s28_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.signal"
+
 # What we call a reward function is a callable that takes a list of prompts and completions and returns a list of
 # rewards. When it's a string, it's a model ID, so it's loaded as a pretrained model.
 RewardFunc = Union[str, PreTrainedModel, Callable[[list, list], list[float]]]
@@ -1098,7 +1102,26 @@ class GRPOTrainer(Trainer):
                 e = e_candidates[0]
                 mask[i, s:e + 1] = 0         # zero-out [<tool_response>, …, </tool_response>]
         return mask
-        
+
+    def _mask_out_token_sequence(self, mask: torch.Tensor, comp_ids: torch.Tensor, token_sequence: str) -> torch.Tensor:
+        """
+        Masks out the exact sequence of tokens matching `token_sequence` in each sequence in comp_ids.
+        `token_sequence` is a string that will be tokenized (without special tokens).
+        The function sets the corresponding positions in `mask` to 0 wherever the exact match occurs.
+        """
+        target_ids = self.processing_class(
+            text=token_sequence, return_tensors="pt", padding=False, add_special_tokens=False
+        )['input_ids'].squeeze(0).to(self.accelerator.device)
+        seq_len = target_ids.size(0)
+
+        for i in range(comp_ids.size(0)):
+            seq = comp_ids[i]  # (C,)
+            for j in range(comp_ids.size(1) - seq_len + 1):
+                if torch.equal(seq[j:j+seq_len], target_ids):
+                    mask[i, j:j+seq_len] = 0  # mask out this exact sequence
+                    break  # stop after the first match in the sequence
+        return mask
+
     def _build_tool_mask(self, comp_ids: torch.Tensor) -> torch.Tensor:
         """
         Returns an int mask of shape (B, C) with 1s on tokens *outside*
@@ -1110,6 +1133,12 @@ class GRPOTrainer(Trainer):
         mask = self._build_tool_mask_for_token(mask, comp_ids, self.args.result_tokens)
         if not self.args.move_context_to_prompt:
             mask = self._build_tool_mask_for_token(mask, comp_ids, self.args.saving_tokens)
+        if self.args.mask_out_forcing:
+            mask = self._mask_out_token_sequence(
+                mask,
+                comp_ids,
+                '\n{"name": "pass", "arguments": {"context": "',
+            )
         return mask
 
 
