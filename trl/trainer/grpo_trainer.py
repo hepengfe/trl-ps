@@ -1552,9 +1552,9 @@ class GRPOTrainer(Trainer):
         else:
             # Gather the reward per function: this part is crucial, because the rewards are normalized per group and the
             # completions may be distributed across processes
-            rewards_per_func = gather(rewards_per_func)
+            rewards_per_func_global = gather(rewards_per_func)
             # Apply weights to each reward function's output and sum
-            rewards = (rewards_per_func * self.reward_weights.to(device).unsqueeze(0)).nansum(dim=1)
+            rewards = (rewards_per_func_global * self.reward_weights.to(device).unsqueeze(0)).nansum(dim=1)
             # Compute grouped-wise rewards
             mean_grouped_rewards = rewards.view(-1, self.num_generations).mean(dim=1)
             std_grouped_rewards = rewards.view(-1, self.num_generations).std(dim=1)
@@ -1580,12 +1580,8 @@ class GRPOTrainer(Trainer):
 
         # Calculate mean reward per function, but only for samples where the function was applied (non-NaN values)
         for i, reward_func_name in enumerate(self.reward_func_names):
-            if self.tool_saving:
-                mean_rewards = torch.nanmean(rewards_per_func_global[:, i]).item()
-                std_rewards = nanstd(rewards_per_func_global[:, i]).item()
-            else:
-                mean_rewards = torch.nanmean(rewards_per_func[:, i]).item()
-                std_rewards = nanstd(rewards_per_func[:, i]).item()
+            mean_rewards = torch.nanmean(rewards_per_func_global[:, i]).item()
+            std_rewards = nanstd(rewards_per_func_global[:, i]).item()
             self._metrics[mode][f"rewards/{reward_func_name}/mean"].append(mean_rewards)
             self._metrics[mode][f"rewards/{reward_func_name}/std"].append(std_rewards)
         self._metrics[mode]["reward"].append(mean_grouped_rewards.mean().item())
