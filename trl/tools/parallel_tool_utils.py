@@ -190,6 +190,7 @@ def generate_with_tool_batch(
     saving_prompt = None,
     move_context_to_prompt: bool = False,
     use_max: bool = False,
+    return_saving: bool = True,
 ) -> Tuple[List[str], List[str], List[Dict[str, int]]]:
     """
     Parameters
@@ -278,6 +279,11 @@ def generate_with_tool_batch(
             tokens_left[global_i] -= comp_ids_len
 
             detect = _detect_tool_use(contexts[global_i])
+
+            ### TMP ###
+            detect["error_tool_use"] = False
+            # detect["tool_use"] = False
+
             if detect["error_tool_use"]:
                 stats[global_i]["num_tool_detect_error"] += 1
                 print(f"[{global_i}] malformed tool call – skipping tool use.")
@@ -289,6 +295,7 @@ def generate_with_tool_batch(
                     done[global_i] = True
                 continue
 
+            
             if not detect["tool_use"]:
                 if stop_token == args.eos_token:
                     if not(contexts[global_i].endswith(args.eos_token)):
@@ -362,6 +369,11 @@ def generate_with_tool_batch(
                 # elif saving_prompt == "2":
                 #     add = f"\n\nBuild on this context from your last attempt:\n{summary}<|im_end|>\n<|im_start|>assistant\n{args.thinking_tokens[0]}"
                 #     contexts[global_i] = contexts[global_i][:prompts_len[global_i] - len("<|im_end|>\n<|im_start|>assistant\n")] + add
+                elif saving_prompt == "debug":
+                    # add = f"<|im_end|>\n<|im_start|>assistant\n"
+                    # contexts[global_i] = contexts[global_i][:prompts_len[global_i] - len("<|im_end|>\n<|im_start|>assistant\n")] + add
+                    toks = 0 # len(tokenizer(add).input_ids) - 5 # <|im_end|>\n<|im_start|>assistant\n                    
+                    contexts[global_i] = contexts[global_i][:prompts_len[global_i]]
                 elif saving_prompt == "context":
                     add = f"\n\nContext:\n{summary}<|im_end|>\n<|im_start|>assistant\n{args.thinking_tokens[0]}"
                     contexts[global_i] = contexts[global_i][:prompts_len[global_i] - len("<|im_end|>\n<|im_start|>assistant\n")] + add
@@ -420,10 +432,11 @@ def generate_with_tool_batch(
     prompts_to_return: List[str] = []
     completions_to_return: List[str] = []
 
-    for i in range(N):
-        # TODO: Maybe allow splitting prompts here
-        prompts_to_return.extend(saving_prompt_per_prompt[i])
-        completions_to_return.extend(saving_completions_per_prompt[i])
+    if return_saving:
+        for i in range(N):
+            # TODO: Maybe allow splitting prompts here
+            prompts_to_return.extend(saving_prompt_per_prompt[i])
+            completions_to_return.extend(saving_completions_per_prompt[i])
         
     # prompts_to_return.extend(prompts)
     for i, context in enumerate(contexts):

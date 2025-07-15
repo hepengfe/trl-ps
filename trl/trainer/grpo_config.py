@@ -678,6 +678,13 @@ class GRPOConfig(TrainingArguments):
         },
     )
 
+    return_saving: bool = field(
+        default=True,
+        metadata={
+            "help": "Whether to return the saving in tool use."
+        },
+    )
+
     def __post_init__(self):
         super().__post_init__()
 

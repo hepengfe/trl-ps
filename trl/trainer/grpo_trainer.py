@@ -81,11 +81,8 @@ if is_vllm_available():
 if is_wandb_available():
     import wandb
 
-
-# READY_FILE = "./completion_ready_s28.signal"
-# Make it time-based
 import datetime
-READY_FILE = f"./completion_ready_s28_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.signal"
+READY_FILE = f"./completion_ready_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.signal"
 
 # What we call a reward function is a callable that takes a list of prompts and completions and returns a list of
 # rewards. When it's a string, it's a model ID, so it's loaded as a pretrained model.
@@ -1075,6 +1072,7 @@ class GRPOTrainer(Trainer):
                 saving_prompt=self.args.saving_prompt,
                 move_context_to_prompt=self.args.move_context_to_prompt,
                 use_max=self.args.use_max,
+                return_saving=self.args.return_saving,
             )
         
     def _build_tool_mask_for_token(self, mask: torch.Tensor, comp_ids: torch.Tensor, token_pair: List[str]) -> torch.Tensor:
