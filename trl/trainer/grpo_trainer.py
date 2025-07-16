@@ -1260,8 +1260,8 @@ class GRPOTrainer(Trainer):
                     if self.tool_saving:
                         idx = 0
                         n_savings = len(completion_ids_all) - n_global_prompts
-
                         while idx < n_savings:
+                            import pdb; pdb.set_trace()
                             if self.args.move_context_to_prompt:
                                 for i, p in enumerate(prompt_ids_all[-n_global_prompts:]): # Iterate through final completions
                                     # Check if continuation has saving

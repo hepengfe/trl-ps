@@ -480,4 +480,5 @@ def generate_with_tool_batch(
     print("Generated tokens:", [stats[i]["generated_tokens"] for i in range(N)])
     print("Generated tokens Avg:", sum(stats[i]["generated_tokens"] for i in range(N)) / N)
     print("Steps total:", step)
+    import pdb; pdb.set_trace()
     return prompts_to_return, completions_to_return, stats
