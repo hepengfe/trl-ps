@@ -281,7 +281,7 @@ def generate_with_tool_batch(
             detect = _detect_tool_use(contexts[global_i])
 
             ### TMP ###
-            detect["error_tool_use"] = False
+            # detect["error_tool_use"] = False
             # detect["tool_use"] = False
 
             if detect["error_tool_use"]:
@@ -346,8 +346,9 @@ def generate_with_tool_batch(
             tool_type = detect["tool_type"]
 
             if tool_type in ["saving", "pass"]:
+                import pdb; pdb.set_trace()
                 if stats[global_i]["num_saving"] >= max_saving:
-                    # done[global_i] = True
+                    done[global_i] = True
                     continue
                 stats[global_i]["num_saving"] += 1
 
@@ -392,6 +393,7 @@ def generate_with_tool_batch(
 
                 tokens_left[global_i] = args.max_completion_length - toks
             else:
+                import pdb; pdb.set_trace()
                 if tool_type not in ("python", "retrieval", "retrieve"):
                     print(f"[{global_i}] Unknown tool type: {tool_type}. Skipping tool use.")
                     stats[global_i]["num_tool_detect_error"] += 1
@@ -448,7 +450,6 @@ def generate_with_tool_batch(
         for i in range(len(prompts_to_return)):
             p, c = prompts_to_return[i], completions_to_return[i]
             if (a_start := c.find("<|im_end|>\n<|im_start|>assistant\n")) != -1:
-                import pdb; pdb.set_trace()
                 # Add it to p instead
                 p += c[:a_start + len("<|im_end|>\n<|im_start|>assistant\n")]
                 c = c[a_start + len("<|im_end|>\n<|im_start|>assistant\n"):]
