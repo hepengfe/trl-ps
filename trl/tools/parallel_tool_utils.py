@@ -347,7 +347,7 @@ def generate_with_tool_batch(
 
             if tool_type in ["saving", "pass"]:
                 if stats[global_i]["num_saving"] >= max_saving:
-                    done[global_i] = True
+                    # done[global_i] = True
                     continue
                 stats[global_i]["num_saving"] += 1
 
@@ -373,6 +373,7 @@ def generate_with_tool_batch(
                     # add = f"<|im_end|>\n<|im_start|>assistant\n"
                     # contexts[global_i] = contexts[global_i][:prompts_len[global_i] - len("<|im_end|>\n<|im_start|>assistant\n")] + add
                     toks = 0 # len(tokenizer(add).input_ids) - 5 # <|im_end|>\n<|im_start|>assistant\n                    
+                    import pdb; pdb.set_trace()
                     contexts[global_i] = contexts[global_i][:prompts_len[global_i]]
                 elif saving_prompt == "context":
                     add = f"\n\nContext:\n{summary}<|im_end|>\n<|im_start|>assistant\n{args.thinking_tokens[0]}"
@@ -447,6 +448,7 @@ def generate_with_tool_batch(
         for i in range(len(prompts_to_return)):
             p, c = prompts_to_return[i], completions_to_return[i]
             if (a_start := c.find("<|im_end|>\n<|im_start|>assistant\n")) != -1:
+                import pdb; pdb.set_trace()
                 # Add it to p instead
                 p += c[:a_start + len("<|im_end|>\n<|im_start|>assistant\n")]
                 c = c[a_start + len("<|im_end|>\n<|im_start|>assistant\n"):]
