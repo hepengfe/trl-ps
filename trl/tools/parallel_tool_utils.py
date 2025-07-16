@@ -212,7 +212,7 @@ def generate_with_tool_batch(
     contexts = prompts[:]
     prompts_len = [len(p) for p in prompts]
     saving_prompt_per_prompt = [[] for _ in range(N)]
-    saving_completions_per_prompt = [[] for _ in range(N)]
+    saving_completions_per_prompt = [[] for _ in range(N)] # Simpler: [[] * N]
     num_steps_per_prompt = [0] * N
     tokens_left = [args.max_completion_length] * N
     done = [False] * N
@@ -225,6 +225,7 @@ def generate_with_tool_batch(
         "num_python_exec_error": 0,
         "num_retriever_exec_error": 0,
         "num_saving_exec_error": 0,
+        "num_saving_invalid_use": 0,
         } for _ in range(N)
     ]
     malformed_tool_call_str = f"\n{args.result_tokens[0]}\n{args.result_tokens[1]}\n"
@@ -272,17 +273,17 @@ def generate_with_tool_batch(
             comp_ids_len = len(comp_ids)
             comp_text = comp_text_list[local_i]
             stop_token = tokenizer.decode(comp_ids[-1])
-            if (stop_token == args.tool_tokens[1]) and not(comp_text.endswith(args.tool_tokens[1])):
-                comp_text += args.tool_tokens[1]
+            if not(comp_text.endswith(stop_token)):
+                comp_text += stop_token
             contexts[global_i] += comp_text
             stats[global_i]["generated_tokens"] += comp_ids_len
             tokens_left[global_i] -= comp_ids_len
 
-            detect = _detect_tool_use(contexts[global_i])
+            if stop_token == args.eos_token:
+                done[global_i] = True
+                continue
 
-            ### TMP ###
-            # detect["error_tool_use"] = False
-            # detect["tool_use"] = False
+            detect = _detect_tool_use(contexts[global_i])
 
             if detect["error_tool_use"]:
                 stats[global_i]["num_tool_detect_error"] += 1
@@ -295,63 +296,56 @@ def generate_with_tool_batch(
                     done[global_i] = True
                 continue
 
-            
             if not detect["tool_use"]:
-                if stop_token == args.eos_token:
-                    if not(contexts[global_i].endswith(args.eos_token)):
-                        contexts[global_i] += args.eos_token
-                    done[global_i] = True
-                    continue
-                elif tokens_left[global_i] <= 0:
-                    if force_saving:
-                        # There can be some issues due to tokenizer non-determinism (see bottom)
-                        # thus we check for args.max_completion_length + saving_force_len even though it has
-                        # args.max_completion_length + saving_force_budget_net of budget to be more conservative
-                        if len(tokenizer(contexts[global_i][prompts_len[global_i]:]).input_ids) < args.max_completion_length + saving_force_len:
-                            # If it already used its last saving, give it the rest of the seq length
-                            if stats[global_i]["num_saving"] == max_saving:
-                                tokens_left[global_i] += saving_force_budget
-                                continue
-                            # Force saving tool call
-                            contexts[global_i] += saving_force_str
-                            tokens_left[global_i] += saving_force_budget_net
-                            stats[global_i]["generated_tokens"] += saving_force_len
+                if tokens_left[global_i] > 0: continue
+                if force_saving:
+                    # There can be some issues due to tokenizer non-determinism (see bottom)
+                    # thus we check for args.max_completion_length + saving_force_len even though it has
+                    # args.max_completion_length + saving_force_budget_net of budget to be more conservative
+                    if len(tokenizer(contexts[global_i][prompts_len[global_i]:]).input_ids) < args.max_completion_length + saving_force_len:
+                        # If it already used its last saving, give it the rest of the seq length
+                        if stats[global_i]["num_saving"] == max_saving:
+                            tokens_left[global_i] += saving_force_budget
                             continue
-                        else:
-                            # In case it ran out of context while calling the tool
-                            detect = _detect_tool_use(contexts[global_i], prompt_idx=prompts_len[global_i], force_end_tag=False)
-                            if not(detect["tool_use"] and detect["tool_type"] in ["saving", "pass"]):
-                                continue
-                            else:
-                                print("Continuing with broken saving tool call.")
-                    elif save_last_k is not None:
-                        # Here it is fine to end directly as it has used the full sequence; no extra budget
-                        if stats[global_i]["num_saving"] >= max_saving:
-                            done[global_i] = True
-                            continue
-                        stats[global_i]["num_saving"] += 1
-
-                        saving_completions_per_prompt[global_i].append(contexts[global_i][prompts_len[global_i]:] + args.eos_token)
-                        saving_prompt_per_prompt[global_i].append(contexts[global_i][:prompts_len[global_i]])
-                        add = args.thinking_tokens[0] + "\n" + contexts[global_i][-save_last_k:]
-                        contexts[global_i] = contexts[global_i][:prompts_len[global_i]] + add
-
-                        tokens_left[global_i] = args.max_completion_length - len(tokenizer(add).input_ids)
+                        # Force saving tool call
+                        contexts[global_i] += saving_force_str
+                        tokens_left[global_i] += saving_force_budget_net
+                        stats[global_i]["generated_tokens"] += saving_force_len
                         continue
                     else:
+                        # In case it ran out of context while calling the tool
+                        detect = _detect_tool_use(contexts[global_i], prompt_idx=prompts_len[global_i], force_end_tag=False)
+                        if not(detect["tool_use"] and detect["tool_type"] in ["saving", "pass"]):
+                            continue # Will be marked as done as no tokens left
+                        else:
+                            print("Continuing with broken saving tool call.")
+                elif save_last_k is not None:
+                    # Here it is fine to end directly as it has used the full sequence; no extra budget
+                    if stats[global_i]["num_saving"] >= max_saving:
                         done[global_i] = True
                         continue
-                else:
-                    continue
-            tool_type = detect["tool_type"]
+                    stats[global_i]["num_saving"] += 1
 
-            if tool_type in ["saving", "pass"]:
-                import pdb; pdb.set_trace()
-                if stats[global_i]["num_saving"] >= max_saving:
+                    saving_completions_per_prompt[global_i].append(contexts[global_i][prompts_len[global_i]:] + args.eos_token)
+                    saving_prompt_per_prompt[global_i].append(contexts[global_i][:prompts_len[global_i]])
+                    add = args.thinking_tokens[0] + "\n" + contexts[global_i][-save_last_k:]
+                    contexts[global_i] = contexts[global_i][:prompts_len[global_i]] + add
+
+                    tokens_left[global_i] = args.max_completion_length - len(tokenizer(add).input_ids)
+                    continue
+                else:
                     done[global_i] = True
                     continue
-                stats[global_i]["num_saving"] += 1
 
+            tool_type = detect["tool_type"]
+            if tool_type in ["saving", "pass"]:
+                if stats[global_i]["num_saving"] >= max_saving:
+                    # Could mark it as done but ideally it never lands here by changing the system prompt
+                    # to clarify when it cannot use it
+                    stats[global_i]["num_saving_invalid_use"] += 1
+                    continue
+
+                stats[global_i]["num_saving"] += 1
                 if "summary" in detect.get("tool_argument", {}):
                     summary = detect["tool_argument"]["summary"]
                 elif "context" in detect.get("tool_argument", {}):
@@ -366,34 +360,44 @@ def generate_with_tool_batch(
                 if saving_prompt is None:
                     add = f"{args.thinking_tokens[0]}\n{summary}\n"
                     contexts[global_i] = contexts[global_i][:prompts_len[global_i]] + add
-                    toks = len(tokenizer(add).input_ids)
+                    # toks = len(tokenizer(add).input_ids)
                 # elif saving_prompt == "2":
                 #     add = f"\n\nBuild on this context from your last attempt:\n{summary}<|im_end|>\n<|im_start|>assistant\n{args.thinking_tokens[0]}"
                 #     contexts[global_i] = contexts[global_i][:prompts_len[global_i] - len("<|im_end|>\n<|im_start|>assistant\n")] + add
                 elif saving_prompt == "debug":
-                    # add = f"<|im_end|>\n<|im_start|>assistant\n"
-                    # contexts[global_i] = contexts[global_i][:prompts_len[global_i] - len("<|im_end|>\n<|im_start|>assistant\n")] + add
-                    toks = 0 # len(tokenizer(add).input_ids) - 5 # <|im_end|>\n<|im_start|>assistant\n                    
-                    import pdb; pdb.set_trace()
+                    toks = 0
                     contexts[global_i] = contexts[global_i][:prompts_len[global_i]]
                 elif saving_prompt == "context":
                     add = f"\n\nContext:\n{summary}<|im_end|>\n<|im_start|>assistant\n{args.thinking_tokens[0]}"
                     contexts[global_i] = contexts[global_i][:prompts_len[global_i] - len("<|im_end|>\n<|im_start|>assistant\n")] + add
-                    toks = len(tokenizer(add).input_ids) - 5 # <|im_end|>\n<|im_start|>assistant\n
+                    # toks = len(tokenizer(add).input_ids) - 5 # <|im_end|>\n<|im_start|>assistant\n
+                elif saving_prompt == "context_maybe":
+                    add = f"\n\nContext that you can use, but may be incorrect:\n{summary}<|im_end|>\n<|im_start|>assistant\n{args.thinking_tokens[0]}"
+                    # Remove system prompt
+                    user_start = contexts[global_i].rfind("<|im_start|>user\n")
+                    contexts[global_i] = contexts[global_i][user_start:prompts_len[global_i]-len("<|im_end|>\n<|im_start|>assistant\n")] + add
+                    # toks = 0 # Allow full tokens as removed system prompt & input tokens don't matter as much as output ones
+                    import pdb; pdb.set_trace()
+                elif saving_prompt == "summary_maybe":
+                    add = f"\n\nSummary of your prior reasoning attempt that may be useful but could also be wrong:\n{summary}<|im_end|>\n<|im_start|>assistant\n{args.thinking_tokens[0]}"
+                    # Remove system prompt
+                    user_start = contexts[global_i].rfind("<|im_start|>user\n")
+                    contexts[global_i] = contexts[global_i][user_start:prompts_len[global_i]-len("<|im_end|>\n<|im_start|>assistant\n")] + add
+                    # toks = 0 # Allow full tokens as removed system prompt & input tokens don't matter as much as output ones
                 elif saving_prompt == "special_before_thinking":
                     add = f"{args.saving_tokens[0]}\n{summary}\n{args.saving_tokens[1]}\n{args.thinking_tokens[0]}\n"
                     contexts[global_i] = contexts[global_i][:prompts_len[global_i]] + add
-                    toks = len(tokenizer(add).input_ids)
+                    # toks = len(tokenizer(add).input_ids)
                 elif saving_prompt == "special_after_thinking":
                     add = f"{args.thinking_tokens[0]}\n{args.saving_tokens[0]}\n{summary}\n{args.saving_tokens[1]}\n"
                     contexts[global_i] = contexts[global_i][:prompts_len[global_i]] + add
-                    toks = len(tokenizer(add).input_ids)
+                    # toks = len(tokenizer(add).input_ids)
                 else:
                     raise ValueError(f"Unknown saving_prompt: {saving_prompt}")
 
-                tokens_left[global_i] = args.max_completion_length - toks
+                tokens_left[global_i] = args.max_completion_length
+                # - toks # Not subtracting toks as input tokens are cheaper anyways
             else:
-                import pdb; pdb.set_trace()
                 if tool_type not in ("python", "retrieval", "retrieve"):
                     print(f"[{global_i}] Unknown tool type: {tool_type}. Skipping tool use.")
                     stats[global_i]["num_tool_detect_error"] += 1
@@ -434,27 +438,36 @@ def generate_with_tool_batch(
 
     prompts_to_return: List[str] = []
     completions_to_return: List[str] = []
+        
 
     if return_saving:
         for i in range(N):
-            # TODO: Maybe allow splitting prompts here
             prompts_to_return.extend(saving_prompt_per_prompt[i])
             completions_to_return.extend(saving_completions_per_prompt[i])
-        
-    # prompts_to_return.extend(prompts)
+
     for i, context in enumerate(contexts):
+        prompts_to_return.append(context[:prompts_len[i]])        
         completions_to_return.append(context[prompts_len[i]:])
-        prompts_to_return.append(context[:prompts_len[i]])
+
 
     if move_context_to_prompt:
         for i in range(len(prompts_to_return)):
-            p, c = prompts_to_return[i], completions_to_return[i]
-            if (a_start := c.find("<|im_end|>\n<|im_start|>assistant\n")) != -1:
-                # Add it to p instead
-                p += c[:a_start + len("<|im_end|>\n<|im_start|>assistant\n")]
-                c = c[a_start + len("<|im_end|>\n<|im_start|>assistant\n"):]
-                prompts_to_return[i] = p
-                completions_to_return[i] = c
+            p = prompts_to_return[i] + completions_to_return[i]
+            split_idx = p.rfind("<|im_end|>\n<|im_start|>assistant\n") + len("<|im_end|>\n<|im_start|>assistant\n")
+            prompts_to_return[i] = p[:split_idx]
+            completions_to_return[i] = p[split_idx:]
+
+    # if move_context_to_prompt:
+    #     ### TODO ###
+    #     if "maybe" in saving_prompt: raise ValueError("Cannot move context to prompt when using saving_prompt with 'maybe' in it.")
+    #     for i in range(len(prompts_to_return)):
+    #         p, c = prompts_to_return[i], completions_to_return[i]
+    #         if (a_start := c.find("<|im_end|>\n<|im_start|>assistant\n")) != -1:
+    #             # Add it to p instead
+    #             p += c[:a_start + len("<|im_end|>\n<|im_start|>assistant\n")]
+    #             c = c[a_start + len("<|im_end|>\n<|im_start|>assistant\n"):]
+    #             prompts_to_return[i] = p
+    #             completions_to_return[i] = c
 
     # if any(len(tokenizer(c).input_ids) > args.max_completion_length for c in completions_to_return):
     #     import pdb; pdb.set_trace()
@@ -469,17 +482,16 @@ def generate_with_tool_batch(
     # The code above can be used for detection.
     for i, c in enumerate(completions_to_return):
         toks = tokenizer(c).input_ids
-        toks_len = len(toks)
-        if toks_len > args.max_completion_length + saving_force_budget:
+        if (toks_len := len(toks)) > args.max_completion_length + saving_force_budget:
             completions_to_return[i] = tokenizer.decode(toks[:args.max_completion_length + saving_force_budget])
             toks_len_new = len(tokenizer(completions_to_return[i]).input_ids)
             print(f"[WARNING] Truncated completion {i} to fit max length: {toks_len} -> {toks_len_new}")
+        # Note that it could still be smaller and not end with an EOS which is handled later via padding
 
-    print("Saving stats:", [stats[i]["num_saving"] for i in range(N)])
+    # print("Saving stats:", [stats[i]["num_saving"] for i in range(N)])
     print("Saving stats Avg:", sum(stats[i]["num_saving"] for i in range(N)) / N)
     print("Max Saving %:", sum(stats[i]["num_saving"] == max_saving for i in range(N)) / N * 100)
-    print("Generated tokens:", [stats[i]["generated_tokens"] for i in range(N)])
+    # print("Generated tokens:", [stats[i]["generated_tokens"] for i in range(N)])
     print("Generated tokens Avg:", sum(stats[i]["generated_tokens"] for i in range(N)) / N)
     print("Steps total:", step)
-    import pdb; pdb.set_trace()
     return prompts_to_return, completions_to_return, stats

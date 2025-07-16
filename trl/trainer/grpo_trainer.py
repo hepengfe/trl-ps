@@ -93,8 +93,7 @@ def exists_between(p, x, y):
     indices = [i for i, val in enumerate(p) if val == y]
     
     # Need at least two appearances of y
-    if len(indices) < 2:
-        return False
+    if len(indices) < 2: return False
 
     # Get the rightmost and 2nd rightmost appearances
     rightmost = indices[-1]
@@ -712,24 +711,24 @@ class GRPOTrainer(Trainer):
                 raise ValueError(
                     f"Invalid tool format: {args.tool_format}. Supported formats are 'qwen' and 'deepseek'."
                 )
-            
+
             # Qwen3's tokenizers has tool tokens. If not using Qwen3, need to manually add these tokens 
             if self.tool_use:
                 # Ensure tokenizer knows the delimiters so we can recognise them by id
                 special = args.result_tokens + args.tool_tokens + args.saving_tokens
-                added = [tok for tok in special
-                        if self.processing_class.convert_tokens_to_ids(tok) is None]
-                print(f"Token list {added} is not in the tokenizer.")
-
-                if len(added) > 0:                              # add if not already present
-                    # self.processing_class.add_tokens(added, special_tokens=True)
-                    self.processing_class.add_tokens(added)
+                added = [tok for tok in special if self.processing_class.convert_tokens_to_ids(tok) is None]
+                if len(added) > 0: # add if not already present
+                    for tok in added:
+                        assert " " not in tok, "Spaces in special tokens break the `self.processing_class.convert_tokens_to_ids(tok) is None` check"
+                    self.processing_class.add_tokens(added) # special_tokens=True)
                     # TODO: Could throw error if vocab embedding not large enough
                     # self.model.resize_token_embeddings(len(self.processing_class))
-                # Cache their ids for quick lookup later
-                print(self.processing_class.convert_tokens_to_ids(args.saving_tokens[0]))
-                print(self.processing_class.convert_tokens_to_ids(args.saving_tokens[1]))
-
+                    print("Added tokens to the tokenizer:", added)
+                
+                self.args.saving_token_ids = [
+                    self.processing_class.convert_tokens_to_ids(tok) for tok in args.saving_tokens
+                ]
+                print("Saving tokens ids:", self.args.saving_token_ids)
 
             # vLLM specific sampling arguments
             self.guided_decoding_regex = args.vllm_guided_decoding_regex
@@ -1216,6 +1215,7 @@ class GRPOTrainer(Trainer):
                             self._metrics[mode]["tools/num_python_exec_error"].append(tool_stats["num_python_exec_error"])
                             self._metrics[mode]["tools/num_retriever_exec_error"].append(tool_stats["num_retriever_exec_error"])
                             self._metrics[mode]["tools/num_saving_exec_error"].append(tool_stats["num_saving_exec_error"])
+                            self._metrics[mode]["tools/num_saving_invalid_use"].append(tool_stats["num_saving_invalid_use"])
                             print("Tool stats", tool_stats)
                 else:
                     completion_ids = [None] * len(all_prompts_text)                
@@ -1241,7 +1241,6 @@ class GRPOTrainer(Trainer):
                         os.remove(READY_FILE)
                         print("Signal file removed.")
 
-
                 # Broadcast the completions from the main process to all processes, ensuring each process receives its
                 # corresponding slice.                
                 n_local_prompts = len(prompts_text)
@@ -1260,33 +1259,34 @@ class GRPOTrainer(Trainer):
                     if self.tool_saving:
                         idx = 0
                         n_savings = len(completion_ids_all) - n_global_prompts
-                        while idx < n_savings:
-                            import pdb; pdb.set_trace()
+                        if n_savings:
                             if self.args.move_context_to_prompt:
+                                im_start_id = self.processing_class.convert_tokens_to_ids("<|im_start|>")
                                 for i, p in enumerate(prompt_ids_all[-n_global_prompts:]): # Iterate through final completions
                                     # Check if continuation has saving
-                                    if exists_between(p, self.processing_class.convert_tokens_to_ids("<|im_start|>"), self.processing_class.convert_tokens_to_ids("Context")):
+                                    if exists_between(p, self.args.saving_token_ids[0], im_start_id):
                                         # Check how many savings
                                         saving_idx_map[i].append(idx) # first one has no saving token but the tool call e.g. <tool_call>\n{"name": "saving", "arguments": {...
                                         idx += 1
                                         if idx >= n_savings: break
-                                        while exists_between(prompt_ids_all[idx], self.processing_class.convert_tokens_to_ids("<|im_start|>"), self.processing_class.convert_tokens_to_ids("Context")):
+                                        while exists_between(prompt_ids_all[idx], self.args.saving_token_ids[0], im_start_id):
                                             saving_idx_map[i].append(idx)
                                             idx += 1
                                             if idx >= n_savings: break
                             else:
                                 for i, c in enumerate(completion_ids_all[-n_global_prompts:]): # Iterate through final completions
                                     # Check if continuation has saving
-                                    if self.processing_class.convert_tokens_to_ids(self.args.saving_tokens[0]) in c:
+                                    if self.args.saving_token_ids[0] in c:
                                         # Check how many savings
                                         saving_idx_map[i].append(idx) # first one has no saving token but the tool call e.g. <tool_call>\n{"name": "saving", "arguments": {...
                                         idx += 1
                                         if idx >= n_savings: break
-                                        while self.processing_class.convert_tokens_to_ids(self.args.saving_tokens[0]) in completion_ids_all[idx]:
+                                        while self.args.saving_token_ids[0] in completion_ids_all[idx]:
                                             saving_idx_map[i].append(idx)
                                             idx += 1
                                             if idx >= n_savings: break
-
+                            
+                            assert idx == n_savings, f"Expected {n_savings} savings, but found {idx}."
 
                     pidx = list(range(self.accelerator.process_index * n_local_prompts, (self.accelerator.process_index + 1) * n_local_prompts))
 
@@ -1374,10 +1374,31 @@ class GRPOTrainer(Trainer):
 
         # Mask everything after the first EOS token
         is_eos = completion_ids == self.processing_class.eos_token_id
-        eos_idx = torch.full((is_eos.size(0),), is_eos.size(1), dtype=torch.long, device=device)
-        eos_idx[is_eos.any(dim=1)] = is_eos.int().argmax(dim=1)[is_eos.any(dim=1)]
-        sequence_indices = torch.arange(is_eos.size(1), device=device).expand(is_eos.size(0), -1)
-        completion_mask = (sequence_indices <= eos_idx.unsqueeze(1)).int()
+
+        # Much simpler than all the below:
+        completion_mask = (completion_ids != self.processing_class.pad_token_id).int()
+        # Assumes that:
+        # 1. The first EOS token is the end of the completion and only followed by PAD tokens.
+        # 2. The completion is padded with PAD tokens which are != EOS tokens.
+
+        # #### Raise an error if there's any completion that has no eos token in it but has padding as its very last token (self.processing_class.pad_token_id)
+        # # Find rows with no EOS at all
+        # no_eos = ~is_eos.any(dim=1)
+        # # Find rows whose last token is PAD
+        # padded_end = completion_ids[:, -1] == self.processing_class.pad_token_id
+        # # Combine and error out if any such row exists
+        # problematic = no_eos & padded_end
+        # if problematic.any():
+        #     bad_idxs = problematic.nonzero(as_tuple=False).squeeze(1).tolist()
+        #     import pdb; pdb.set_trace()
+        #     raise ValueError(f"Found completions without EOS but padded at end at batch indices: {bad_idxs}")
+        # # ————————————————————————————————————————————————
+
+        # eos_idx = torch.full((is_eos.size(0),), is_eos.size(1), dtype=torch.long, device=device)
+        # # Raise an error if there's any completion that has no EOS but padding as its last token
+        # eos_idx[is_eos.any(dim=1)] = is_eos.int().argmax(dim=1)[is_eos.any(dim=1)]
+        # sequence_indices = torch.arange(is_eos.size(1), device=device).expand(is_eos.size(0), -1)
+        # completion_mask = (sequence_indices <= eos_idx.unsqueeze(1)).int()
 
         # Sum along sequence dimension (dim=1) to get completion length per sequence, used for logging
         completion_lengths = completion_mask.sum(1)
@@ -1589,7 +1610,9 @@ class GRPOTrainer(Trainer):
         # Log prompt and completion texts; No need to gather across processes as we log only very few
         # :maxlen as it may be longer due to saving in which case we want the saving ones at the start logged
         self._textual_logs["prompt"].extend(prompts_text[:self.maxlen])
-        self._textual_logs["completion"].extend(completions_text[:self.maxlen])
+        # self._textual_logs["completion"].extend(completions_text[:self.maxlen])
+        # Optionally with special toks
+        self._textual_logs["completion"].extend(self.processing_class.batch_decode(completion_ids, skip_special_tokens=False)[:self.maxlen])
         if "solution" in inputs[0]:
             if self.tool_saving:
                 sols = [
