@@ -344,8 +344,8 @@ def generate_with_tool_batch(
                     # to clarify when it cannot use it
                     stats[global_i]["num_saving_invalid_use"] += 1
                     continue
-
                 stats[global_i]["num_saving"] += 1
+
                 if "summary" in detect.get("tool_argument", {}):
                     summary = detect["tool_argument"]["summary"]
                 elif "context" in detect.get("tool_argument", {}):
@@ -373,15 +373,20 @@ def generate_with_tool_batch(
                     # toks = len(tokenizer(add).input_ids) - 5 # <|im_end|>\n<|im_start|>assistant\n
                 elif saving_prompt == "context_maybe":
                     add = f"\n\nContext that you can use, but may be incorrect:\n{summary}<|im_end|>\n<|im_start|>assistant\n{args.thinking_tokens[0]}"
-                    # Remove system prompt
-                    user_start = contexts[global_i].rfind("<|im_start|>user\n")
+                    if stats[global_i]["num_saving"] == max_saving:
+                        # Remove system prompt
+                        user_start = contexts[global_i].rfind("<|im_start|>user\n")
+                    else:
+                        user_start = 0
                     contexts[global_i] = contexts[global_i][user_start:prompts_len[global_i]-len("<|im_end|>\n<|im_start|>assistant\n")] + add
                     # toks = 0 # Allow full tokens as removed system prompt & input tokens don't matter as much as output ones
-                    import pdb; pdb.set_trace()
                 elif saving_prompt == "summary_maybe":
                     add = f"\n\nSummary of your prior reasoning attempt that may be useful but could also be wrong:\n{summary}<|im_end|>\n<|im_start|>assistant\n{args.thinking_tokens[0]}"
-                    # Remove system prompt
-                    user_start = contexts[global_i].rfind("<|im_start|>user\n")
+                    if stats[global_i]["num_saving"] == max_saving:
+                        # Remove system prompt
+                        user_start = contexts[global_i].rfind("<|im_start|>user\n")
+                    else:
+                        user_start = 0
                     contexts[global_i] = contexts[global_i][user_start:prompts_len[global_i]-len("<|im_end|>\n<|im_start|>assistant\n")] + add
                     # toks = 0 # Allow full tokens as removed system prompt & input tokens don't matter as much as output ones
                 elif saving_prompt == "special_before_thinking":
