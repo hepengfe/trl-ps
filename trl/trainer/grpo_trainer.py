@@ -1065,7 +1065,7 @@ class GRPOTrainer(Trainer):
                 questions,
                 self.args,
                 tokenizer=self.processing_class,
-                force_saving=self.args.force_saving,
+                budget_force_saving=self.args.budget_force_saving,
                 save_last_k=self.args.save_last_k,
                 max_saving=self.args.max_num_savings,
                 saving_prompt=self.args.saving_prompt,
@@ -1377,7 +1377,6 @@ class GRPOTrainer(Trainer):
 
         # Much simpler than all the below:
         completion_mask = (completion_ids != self.processing_class.pad_token_id).int()
-        import pdb; pdb.set_trace()
         # Assumes that:
         # 1. The first EOS token is the end of the completion and only followed by PAD tokens.
         # 2. The completion is padded with PAD tokens which are != EOS tokens.
