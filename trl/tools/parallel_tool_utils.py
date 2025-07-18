@@ -244,7 +244,7 @@ def generate_with_tool_batch(
         active_prompts = [contexts[i] for i in active_idx]
 
         if use_max:
-            # ~2x faster with 1x saving
+            # ~2x faster with 1x saving (but higher OOM risk)
             tokens_left_active = [tokens_left[i] for i in active_idx]
             comp_ids_list, comp_text_list = _make_tool_inference_requests_batch(
                 active_prompts,
@@ -322,8 +322,7 @@ def generate_with_tool_batch(
                 elif save_last_k is not None:
                     # Here it is fine to end directly as it has used the full sequence; no extra budget
                     if stats[global_i]["num_saving"] >= max_saving:
-                        done[global_i] = True
-                        continue
+                        continue # Will be marked as done as no tokens left
                     stats[global_i]["num_saving"] += 1
 
                     saving_completions_per_prompt[global_i].append(contexts[global_i][prompts_len[global_i]:] + args.eos_token)
@@ -331,7 +330,7 @@ def generate_with_tool_batch(
                     add = args.thinking_tokens[0] + "\n" + contexts[global_i][-save_last_k:]
                     contexts[global_i] = contexts[global_i][:prompts_len[global_i]] + add
 
-                    tokens_left[global_i] = args.max_completion_length - len(tokenizer(add).input_ids)
+                    tokens_left[global_i] = args.max_completion_length # - len(tokenizer(add).input_ids)
                     continue
                 else:
                     done[global_i] = True
@@ -372,7 +371,8 @@ def generate_with_tool_batch(
                     contexts[global_i] = contexts[global_i][:prompts_len[global_i] - len("<|im_end|>\n<|im_start|>assistant\n")] + add
                     # toks = len(tokenizer(add).input_ids) - 5 # <|im_end|>\n<|im_start|>assistant\n
                 elif saving_prompt == "context_maybe":
-                    add = f"\n\nContext that you can use, but may be incorrect:\n{summary}<|im_end|>\n<|im_start|>assistant\n{args.thinking_tokens[0]}"
+                    # Context that you can use, but may be incorrect:
+                    add = f"\n\nContext from your prior reasoning attempt that may be useful but could also be wrong:\n{summary}<|im_end|>\n<|im_start|>assistant\n{args.thinking_tokens[0]}"
                     if stats[global_i]["num_saving"] == max_saving:
                         # Remove system prompt
                         user_start = contexts[global_i].rfind("<|im_start|>user\n")

@@ -1377,6 +1377,7 @@ class GRPOTrainer(Trainer):
 
         # Much simpler than all the below:
         completion_mask = (completion_ids != self.processing_class.pad_token_id).int()
+        import pdb; pdb.set_trace()
         # Assumes that:
         # 1. The first EOS token is the end of the completion and only followed by PAD tokens.
         # 2. The completion is padded with PAD tokens which are != EOS tokens.
