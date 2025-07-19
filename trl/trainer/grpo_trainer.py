@@ -1260,6 +1260,18 @@ class GRPOTrainer(Trainer):
                         idx = 0
                         n_savings = len(completion_ids_all) - n_global_prompts
                         if n_savings:
+                            if self.args.save_last_k and self.args.move_context_to_prompt:
+                                for i, p in enumerate(prompt_ids_all[-n_global_prompts:]): # Iterate through final completions
+                                    # Check if continuation has saving
+                                    if self.args.saving_token_ids[0] in p:
+                                        # Check how many savings
+                                        saving_idx_map[i].append(idx) # first one has no saving token but the tool call e.g. <tool_call>\n{"name": "saving", "arguments": {...
+                                        idx += 1
+                                        if idx >= n_savings: break
+                                        while self.args.saving_token_ids[0] in prompt_ids_all[idx]:
+                                            saving_idx_map[i].append(idx)
+                                            idx += 1
+                                            if idx >= n_savings: break
                             if self.args.move_context_to_prompt:
                                 im_start_id = self.processing_class.convert_tokens_to_ids("<|im_start|>")
                                 for i, p in enumerate(prompt_ids_all[-n_global_prompts:]): # Iterate through final completions
@@ -1610,9 +1622,9 @@ class GRPOTrainer(Trainer):
         # Log prompt and completion texts; No need to gather across processes as we log only very few
         # :maxlen as it may be longer due to saving in which case we want the saving ones at the start logged
         self._textual_logs["prompt"].extend(prompts_text[:self.maxlen])
-        # self._textual_logs["completion"].extend(completions_text[:self.maxlen])
+        self._textual_logs["completion"].extend(completions_text[:self.maxlen])
         # Optionally with special toks
-        self._textual_logs["completion"].extend(self.processing_class.batch_decode(completion_ids, skip_special_tokens=False)[:self.maxlen])
+        # self._textual_logs["completion"].extend(self.processing_class.batch_decode(completion_ids, skip_special_tokens=False)[:self.maxlen])
         if "solution" in inputs[0]:
             if self.tool_saving:
                 sols = [

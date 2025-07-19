@@ -604,15 +604,7 @@ class GRPOConfig(TrainingArguments):
     #         "help": "Continue token for tool inference. Model will resume thinking after this token. "
     #     },
     # )
-    
-    assistant_token: str = field(
-        default="<｜Assistant｜>",
-        metadata={
-            "help": "Assistant token to be detected during tool inference. If detected, "
-            "will append tool use results after the assistant token"
-        },
-    )
-    
+
     thinking_tokens: list[str] = field(
         default_factory=lambda: ["<think>", "</think>"],
         metadata={
@@ -636,7 +628,7 @@ class GRPOConfig(TrainingArguments):
         },
     )
 
-    force_saving: bool = field(
+    budget_force_saving: bool = field(
         default=False,
         metadata={
             "help": "Whether to force saving."

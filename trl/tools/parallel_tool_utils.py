@@ -207,7 +207,16 @@ def generate_with_tool_batch(
     stats
         Per-prompt statistics: number of python / retrieval / saving calls, &
         total generated tokens.
-    """
+    """   
+    if budget_force_saving:
+        if saving_prompt == "summary_maybe":
+            force_saving_str = '\n' + args.tool_tokens[0] + '\n{"name": "save", "arguments": {"summary": "'
+        else:
+            force_saving_str = '\n' + args.tool_tokens[0] + '\n{"name": "pass", "arguments": {"context": "'    
+        force_saving_len = len(tokenizer(force_saving_str).input_ids)
+        budget_force_saving_net = budget_force_saving - force_saving_len
+        args.max_completion_length -= budget_force_saving
+
     N = len(prompts)
     contexts = prompts[:]
     prompts_len = [len(p) for p in prompts]
@@ -229,15 +238,6 @@ def generate_with_tool_batch(
     ]
     malformed_tool_call_str = f"\n{args.result_tokens[0]}\n{args.result_tokens[1]}\n"
     malformed_tool_call_len = len(tokenizer(malformed_tool_call_str).input_ids)
-   
-    if budget_force_saving:
-        if saving_prompt == "summary_maybe":
-            force_saving_str = '\n' + args.tool_tokens[0] + '\n{"name": "save", "arguments": {"summary": "'
-        else:
-            force_saving_str = '\n' + args.tool_tokens[0] + '\n{"name": "pass", "arguments": {"context": "'    
-        force_saving_len = len(tokenizer(force_saving_str).input_ids)
-        budget_force_saving_net = budget_force_saving - force_saving_len
-        args.max_completion_length -= budget_force_saving
 
     step = 0
     while not all(done):
@@ -250,7 +250,7 @@ def generate_with_tool_batch(
         if use_max:
             # ~2x faster with 1x saving (but higher OOM risk)
             comp_ids_list, comp_text_list = _make_tool_inference_requests_batch(
-                active_prompts,
+                active_prompts, # Technically could always append <think> for Qwen3 to save 1 token
                 max_tokens=max(tokens_left_active),
                 args=args,
                 stop=[args.tool_tokens[1], args.eos_token],
@@ -326,14 +326,23 @@ def generate_with_tool_batch(
                     # Here it is fine to end directly as it has used the full sequence; no extra budget
                     if stats[global_i]["num_saving"] >= max_saving:
                         continue # Will be marked as done as no tokens left
-                    stats[global_i]["num_saving"] += 1
 
-                    saving_completions_per_prompt[global_i].append(contexts[global_i][prompts_len[global_i]:] + args.eos_token)
-                    saving_prompt_per_prompt[global_i].append(contexts[global_i][:prompts_len[global_i]])
-                    add = args.thinking_tokens[0] + "\n" + contexts[global_i][-save_last_k:]
+                    # If it has saved before, then it starts with saving part which we may want to move to the prompt
+                    toks = tokenizer(contexts[global_i][prompts_len[global_i]:]).input_ids                    
+                    if (move_context_to_prompt) and (stats[global_i]["num_saving"] > 0):
+                        saving_txt_prev = tokenizer.decode(toks[:save_last_k])
+                        saving_prompt_per_prompt[global_i].append(contexts[global_i][:prompts_len[global_i]] + saving_txt_prev)
+                        saving_completions_per_prompt[global_i].append(tokenizer.decode(toks[save_last_k:]))
+                    else:
+                        saving_prompt_per_prompt[global_i].append(contexts[global_i][:prompts_len[global_i]])
+                        saving_completions_per_prompt[global_i].append(contexts[global_i][prompts_len[global_i]:])
+
+                    saving_txt_next = tokenizer.decode(toks[-(save_last_k-2):]) # Subtract 2 for think & \n
+                    add = args.thinking_tokens[0] + "\n" + saving_txt_next
                     contexts[global_i] = contexts[global_i][:prompts_len[global_i]] + add
 
                     tokens_left[global_i] = args.max_completion_length
+                    stats[global_i]["num_saving"] += 1
                     continue
                 else:
                     done[global_i] = True
@@ -366,27 +375,27 @@ def generate_with_tool_batch(
                     toks = 0
                     contexts[global_i] = contexts[global_i][:prompts_len[global_i]]
                 elif saving_prompt == "context":
-                    add = f"\n\nContext:\n{summary}<|im_end|>\n<|im_start|>assistant\n{args.thinking_tokens[0]}"
+                    add = f"\n\nContext:\n{summary}<|im_end|>\n<|im_start|>assistant\n"
                     contexts[global_i] = contexts[global_i][:prompts_len[global_i] - len("<|im_end|>\n<|im_start|>assistant\n")] + add
                     # Commented out below to allow full tokens as removed system prompt & input tokens don't matter as much as output ones
                     # toks = len(tokenizer(add).input_ids) - 5 # <|im_end|>\n<|im_start|>assistant\n
                 elif saving_prompt == "context_maybe":
                     # Context that you can use, but may be incorrect:
-                    add = f"\n\nContext from your prior reasoning attempt that may be useful but could also be wrong:\n{summary}<|im_end|>\n<|im_start|>assistant\n{args.thinking_tokens[0]}"
+                    add = f"\n\nContext from your prior reasoning attempt that may be useful but could also be wrong:\n{summary}<|im_end|>\n<|im_start|>assistant\n"
                     if stats[global_i]["num_saving"] == max_saving:
                         user_start = contexts[global_i].rfind("<|im_start|>user\n") # Remove system prompt
                     else:
                         user_start = 0
                     contexts[global_i] = contexts[global_i][user_start:prompts_len[global_i]-len("<|im_end|>\n<|im_start|>assistant\n")] + add
                 elif saving_prompt == "summary_maybe":
-                    add = f"\n\nSummary of your prior reasoning attempt that may be useful but could also be wrong:\n{summary}<|im_end|>\n<|im_start|>assistant\n{args.thinking_tokens[0]}"
+                    add = f"\n\nSummary of your prior reasoning attempt that may be useful but could also be wrong:\n{summary}<|im_end|>\n<|im_start|>assistant\n"
                     if stats[global_i]["num_saving"] == max_saving:
                         user_start = contexts[global_i].rfind("<|im_start|>user\n") # Remove system prompt
                     else:
                         user_start = 0
                     contexts[global_i] = contexts[global_i][user_start:prompts_len[global_i]-len("<|im_end|>\n<|im_start|>assistant\n")] + add
                 elif saving_prompt == "special_before_thinking":
-                    add = f"{args.saving_tokens[0]}\n{summary}\n{args.saving_tokens[1]}\n{args.thinking_tokens[0]}\n"
+                    add = f"{args.saving_tokens[0]}\n{summary}\n{args.saving_tokens[1]}\n"
                     contexts[global_i] = contexts[global_i][:prompts_len[global_i]] + add
                 elif saving_prompt == "special_after_thinking":
                     add = f"{args.thinking_tokens[0]}\n{args.saving_tokens[0]}\n{summary}\n{args.saving_tokens[1]}\n"
@@ -442,16 +451,28 @@ def generate_with_tool_batch(
             prompts_to_return.extend(saving_prompt_per_prompt[i])
             completions_to_return.extend(saving_completions_per_prompt[i])
 
-    for i, context in enumerate(contexts):
-        prompts_to_return.append(context[:prompts_len[i]])
-        completions_to_return.append(context[prompts_len[i]:])
+    if save_last_k and move_context_to_prompt:
+        for i, context in enumerate(contexts):
+            # these have saving hence need to adjust the prompt added
+            if stats[i]["num_saving"] > 0:
+                toks = tokenizer(context[prompts_len[i]:]).input_ids
+                saving_txt = tokenizer.decode(toks[:save_last_k])
+                prompts_to_return.append(context[:prompts_len[i]] + saving_txt)
+                completions_to_return.append(tokenizer.decode(toks[save_last_k:]))
+            else:
+                prompts_to_return.append(context[:prompts_len[i]])
+                completions_to_return.append(context[prompts_len[i]:])
+    else:
+        for i, context in enumerate(contexts):
+            prompts_to_return.append(context[:prompts_len[i]])
+            completions_to_return.append(context[prompts_len[i]:])
 
-    if move_context_to_prompt:
-        for i in range(len(prompts_to_return)):
-            p = prompts_to_return[i] + completions_to_return[i]
-            split_idx = p.rfind("<|im_end|>\n<|im_start|>assistant\n") + len("<|im_end|>\n<|im_start|>assistant\n")
-            prompts_to_return[i] = p[:split_idx]
-            completions_to_return[i] = p[split_idx:]
+        if move_context_to_prompt:
+            for i in range(len(prompts_to_return)):
+                p = prompts_to_return[i] + completions_to_return[i]
+                split_idx = p.rfind("<|im_end|>\n<|im_start|>assistant\n") + len("<|im_end|>\n<|im_start|>assistant\n")
+                prompts_to_return[i] = p[:split_idx]
+                completions_to_return[i] = p[split_idx:]
 
     args.max_completion_length += budget_force_saving
     # if any(len(tokenizer(c).input_ids) > args.max_completion_length for c in completions_to_return):
