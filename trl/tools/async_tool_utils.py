@@ -15,7 +15,7 @@ from ..trainer.grpo_config import GRPOConfig
 def _make_tool_inference_requests(
     prompt: str,
     max_tokens: int,
-    args: trl.GRPOConfig,
+    args: GRPOConfig,
     stop: Optional[Union[str, List[str]]] = None,
 ) -> Tuple[List[List[int]], List[str]]:
     session = requests.Session()
