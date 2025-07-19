@@ -185,7 +185,7 @@ def generate_with_tool_batch(
     llm: LLM = None,
     tokenizer = None,
     budget_force_saving: int = 0,
-    max_saving: int = 15,
+    max_saving: int = 1,
     save_last_k: int = 0,
     saving_prompt = None,
     move_context_to_prompt: bool = False,
@@ -216,6 +216,7 @@ def generate_with_tool_batch(
         force_saving_len = len(tokenizer(force_saving_str).input_ids)
         budget_force_saving_net = budget_force_saving - force_saving_len
         args.max_completion_length -= budget_force_saving
+        is_forced = [False] * len(prompts) # To track if last saving was forced
 
     N = len(prompts)
     contexts = prompts[:]
@@ -228,7 +229,8 @@ def generate_with_tool_batch(
         {"generated_tokens": 0, 
         "num_python": 0, 
         "num_retrieval": 0, 
-        "num_saving": 0, 
+        "num_saving": 0,
+        "num_saving_forced": 0,        
         "num_tool_detect_error": 0, 
         "num_python_exec_error": 0,
         "num_retriever_exec_error": 0,
@@ -302,10 +304,7 @@ def generate_with_tool_batch(
             if not detect["tool_use"]:
                 if tokens_left[global_i] > 0: continue
                 if budget_force_saving:
-                    # There can be some issues due to tokenizer non-determinism (see bottom)
-                    # thus we check for args.max_completion_length + force_saving_len even though it has
-                    # args.max_completion_length + budget_force_saving_net of budget to be more conservative
-                    if len(tokenizer(contexts[global_i][prompts_len[global_i]:]).input_ids) < args.max_completion_length + force_saving_len:
+                    if not(is_forced[global_i]): # Only force once per ctxt
                         # If it already used its last saving, give it the rest of the seq length
                         if stats[global_i]["num_saving"] == max_saving:
                             tokens_left[global_i] += budget_force_saving
@@ -314,6 +313,8 @@ def generate_with_tool_batch(
                         contexts[global_i] += force_saving_str
                         tokens_left[global_i] += budget_force_saving_net
                         stats[global_i]["generated_tokens"] += force_saving_len
+                        is_forced[global_i] = True
+                        stats[global_i]["num_saving_forced"] += 1
                         continue
                     else:
                         # In case it ran out of context while calling the tool
@@ -356,6 +357,8 @@ def generate_with_tool_batch(
                     stats[global_i]["num_saving_invalid_use"] += 1
                     continue
                 stats[global_i]["num_saving"] += 1
+                if budget_force_saving: # Reset is_forced as used now
+                    is_forced[global_i] = False
 
                 if "summary" in detect.get("tool_argument", {}):
                     summary = detect["tool_argument"]["summary"]
@@ -387,6 +390,17 @@ def generate_with_tool_batch(
                     else:
                         user_start = 0
                     contexts[global_i] = contexts[global_i][user_start:prompts_len[global_i]-len("<|im_end|>\n<|im_start|>assistant\n")] + add
+                elif saving_prompt == "context_system":
+                    # Context that you can use, but may be incorrect:
+                    system = 'When context is passed to you, evaluate its correctness first and then use it if correct, below is an example.\n<|im_start|>user\nThere exist real numbers $x$ and $y$, both greater than 1, such that $\log_x\left(y^x\\right)=\log_y\left(x^{4y}\\right)=10$. Find $xy$.\n\nContext:\nMaybe convert logarithmic equations into exponential form to make them easier to handle. Via logarithm power rule log_x(y^x) = x * log_x(y) = 10. Noting that log_x(y) is the same as 1 / log_y(x). Maybe try express log_x(y) in terms of something else.<|im_end|>\n<|im_start|>assistant\n<think>\nOkay, so I need to first evaluate whether the context is correct and then use it to solve the problem.\n\nThe context suggests converting logarithmic equations into exponential form and using the logarithm power rule, which is a valid approach. It also notes that log_x(y) can be expressed in terms of log_y(x), which is correct. It suggests expressing log_x(y) in terms of something else.\n\nWait, do we really need to express log_x(y) in terms of something else? Maybe we can instead first use the logarithm power rule for the second equation as well. Let me do that...'
+                    add = f"\n\nContext:\n{summary}<|im_end|>\n<|im_start|>assistant\n"
+                    if stats[global_i]["num_saving"] == max_saving:
+                        prepend = "<|im_start|>system\n" + system + "<|im_end|>\n"
+                        user_start = contexts[global_i].rfind("<|im_start|>user\n") # Remove system prompt
+                    else:
+                        prepend = ""
+                        user_start = 0
+                    contexts[global_i] = prepend + contexts[global_i][user_start:prompts_len[global_i]-len("<|im_end|>\n<|im_start|>assistant\n")] + add                    
                 elif saving_prompt == "summary_maybe":
                     add = f"\n\nSummary of your prior reasoning attempt that may be useful but could also be wrong:\n{summary}<|im_end|>\n<|im_start|>assistant\n"
                     if stats[global_i]["num_saving"] == max_saving:

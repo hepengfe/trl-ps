@@ -42,7 +42,13 @@ def _make_tool_inference_requests(
         raise Exception(f"Request failed: {response.status_code}, {response.text}")
 
 
-def _detect_tool_use(context: str, prompt_idx: int = 0, force_end_tag = True) -> dict:
+def _detect_tool_use(
+    context: str,
+    prompt_idx: int = 0,
+    force_end_tag = True,
+    start_tag: str = "<tool_call>",
+    end_tag: str = "</tool_call>",
+) -> dict:
     """
     Detect tool usage in a generation context. Extracts:
     - Python code, Retrieval query or Saved summary
@@ -54,6 +60,7 @@ def _detect_tool_use(context: str, prompt_idx: int = 0, force_end_tag = True) ->
         "tool_type": "python" | "retrieval" | "saving" | None,
         "tool_argument": str or (start_idx, end_idx, extracted_string) or None,
         "error_tool_use": bool
+        "tool_start_idx": int or None
     }
     """
     result = {
@@ -63,29 +70,25 @@ def _detect_tool_use(context: str, prompt_idx: int = 0, force_end_tag = True) ->
         "error_tool_use": False,
         "tool_start_idx": None,
     }
-    start_tag = "<tool_call>"
-    end_tag = "</tool_call>"
 
     if force_end_tag:
         if not context.endswith(end_tag): return result
-        start = context.rfind(start_tag)
-        if start == -1: return result
+        if (start := context.rfind(start_tag)) == -1: return result
         tool_call_raw = context[start + len(start_tag):-len(end_tag)].strip()
     else:
-        start = context.rfind(start_tag, prompt_idx) # produces a global index
-        if start == -1: return result
+        # Produces a global index
+        if (start := context.rfind(start_tag, prompt_idx)) == -1: return result
         tool_call_raw = context[start + len(start_tag):].strip()
 
     try:
         parsed = json.loads(tool_call_raw)
-        result = {
+        return {
             "tool_use": True,
             "tool_type": parsed["name"],
             "tool_argument": parsed["arguments"],
             "error_tool_use": False,
             "tool_start_idx": start,
         }
-        return result
     except Exception as e: # json.JSONDecodeError or UnicodeDecodeError
         pass
         # print(f"Failed to parse {tool_call_raw} due to {e}")
