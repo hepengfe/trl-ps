@@ -207,7 +207,8 @@ def generate_with_tool_batch(
     stats
         Per-prompt statistics: number of python / retrieval / saving calls, &
         total generated tokens.
-    """   
+    """
+    N = len(prompts)
     if budget_force_saving:
         if saving_prompt == "summary_maybe":
             force_saving_str = '\n' + args.tool_tokens[0] + '\n{"name": "save", "arguments": {"summary": "'
@@ -216,9 +217,8 @@ def generate_with_tool_batch(
         force_saving_len = len(tokenizer(force_saving_str).input_ids)
         budget_force_saving_net = budget_force_saving - force_saving_len
         args.max_completion_length -= budget_force_saving
-        is_forced = [False] * len(prompts) # To track if last saving was forced
+        is_forced = [False] * N # To track if last saving was forced
 
-    N = len(prompts)
     contexts = prompts[:]
     prompts_len = [len(p) for p in prompts]
     saving_prompt_per_prompt = [[] for _ in range(N)]
@@ -250,6 +250,7 @@ def generate_with_tool_batch(
         tokens_left_active = [tokens_left[i] for i in active_idx]
 
         if use_max:
+            # import pdb; pdb.set_trace()
             # ~2x faster with 1x saving (but higher OOM risk)
             comp_ids_list, comp_text_list = _make_tool_inference_requests_batch(
                 active_prompts, # Technically could always append <think> for Qwen3 to save 1 token
@@ -303,12 +304,8 @@ def generate_with_tool_batch(
 
             if not detect["tool_use"]:
                 if tokens_left[global_i] > 0: continue
-                if budget_force_saving:
+                if budget_force_saving and (stats[global_i]["num_saving"] < max_saving):
                     if not(is_forced[global_i]): # Only force once per ctxt
-                        # If it already used its last saving, give it the rest of the seq length
-                        if stats[global_i]["num_saving"] == max_saving:
-                            tokens_left[global_i] += budget_force_saving
-                            continue
                         # Force saving tool call
                         contexts[global_i] += force_saving_str
                         tokens_left[global_i] += budget_force_saving_net
@@ -418,6 +415,8 @@ def generate_with_tool_batch(
                     raise ValueError(f"Unknown saving_prompt: {saving_prompt}")
 
                 tokens_left[global_i] = args.max_completion_length # - toks # Not subtracting toks, see above
+                if budget_force_saving and (stats[global_i]["num_saving"] == max_saving):
+                    tokens_left[global_i] += budget_force_saving # If already used last saving, give it rest of seq len
             else:
                 if tool_type not in ("python", "retrieval", "retrieve"):
                     print(f"[{global_i}] Unknown tool type: {tool_type}. Skipping tool use.")

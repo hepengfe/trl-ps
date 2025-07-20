@@ -1273,7 +1273,7 @@ class GRPOTrainer(Trainer):
                                             saving_idx_map[i].append(idx)
                                             idx += 1
                                             if idx >= n_savings: break
-                            if self.args.move_context_to_prompt:
+                            elif self.args.move_context_to_prompt:
                                 im_start_id = self.processing_class.convert_tokens_to_ids("<|im_start|>")
                                 for i, p in enumerate(prompt_ids_all[-n_global_prompts:]): # Iterate through final completions
                                     # Check if continuation has saving

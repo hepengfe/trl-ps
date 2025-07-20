@@ -622,16 +622,16 @@ class GRPOConfig(TrainingArguments):
     )
     
     max_num_savings: int = field(
-        default=16,
+        default=1,
         metadata={
             "help": "Maximum number of summarization. Only keep the last summarization in thinking."
         },
     )
 
-    budget_force_saving: bool = field(
-        default=False,
+    budget_force_saving: int = field(
+        default=0,
         metadata={
-            "help": "Whether to force saving."
+            "help": "Will force saving for last x toks if > 0."
         },
     )
 
