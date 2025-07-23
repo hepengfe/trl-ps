@@ -191,6 +191,7 @@ def generate_with_tool_batch(
     move_context_to_prompt: bool = False,
     use_max: bool = False,
     return_saving: bool = True,
+    subtract: bool = False,
 ) -> Tuple[List[str], List[str], List[Dict[str, int]]]:
     """
     Parameters
@@ -340,6 +341,8 @@ def generate_with_tool_batch(
                     contexts[global_i] = contexts[global_i][:prompts_len[global_i]] + add
 
                     tokens_left[global_i] = args.max_completion_length
+                    if subtract:
+                        tokens_left[global_i] -= save_last_k
                     stats[global_i]["num_saving"] += 1
                     continue
                 else:

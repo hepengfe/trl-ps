@@ -1897,9 +1897,8 @@ class GRPOTrainer(Trainer):
                 df = pd.DataFrame(table)
                 if self.wandb_log_unique_prompts:
                     df = df.drop_duplicates(subset=["prompt"])
-                # wandb.log({"completions": wandb.Table(dataframe=df)})
-                if len(df) > 4: # Sample 3 from head and 1 from tail
-                    df = pd.concat([df.head(3), df.tail(1)])
+                if len(df) > 16: # Sample 15 from head and 1 from tail
+                    df = pd.concat([df.head(15), df.tail(1)])
                 wandb.log({f"completions/{str(self.state.global_step)}": wandb.Table(dataframe=df)})
 
     def create_model_card(
