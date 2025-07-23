@@ -420,6 +420,8 @@ def generate_with_tool_batch(
                 tokens_left[global_i] = args.max_completion_length # - toks # Not subtracting toks, see above
                 if budget_force_saving and (stats[global_i]["num_saving"] == max_saving):
                     tokens_left[global_i] += budget_force_saving # If already used last saving, give it rest of seq len
+                if os.getenv("ADDEXTRA") == "1":
+                    tokens_left[global_i] *= 2
             else:
                 if tool_type not in ("python", "retrieval", "retrieve"):
                     print(f"[{global_i}] Unknown tool type: {tool_type}. Skipping tool use.")
@@ -504,7 +506,7 @@ def generate_with_tool_batch(
     # The code above can be used for detection.
     for i, c in enumerate(completions_to_return):
         toks = tokenizer(c).input_ids
-        if (toks_len := len(toks)) > args.max_completion_length:
+        if (toks_len := len(toks)) > args.max_completion_length + (int(os.getenv("ADDEXTRA") == "1") * args.max_completion_length):
             completions_to_return[i] = tokenizer.decode(toks[:args.max_completion_length])
             toks_len_new = len(tokenizer(completions_to_return[i]).input_ids)
             print(f"[WARNING] Truncated completion {i} to fit max length: {toks_len} -> {toks_len_new}")
