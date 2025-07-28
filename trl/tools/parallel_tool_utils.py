@@ -192,6 +192,8 @@ def generate_with_tool_batch(
     use_max: bool = False,
     return_saving: bool = True,
     subtract: bool = False,
+    add_ctxt_counter: bool = False,
+    add_ctxt_expl: bool = False,
 ) -> Tuple[List[str], List[str], List[Dict[str, int]]]:
     """
     Parameters
@@ -211,6 +213,9 @@ def generate_with_tool_batch(
     """
     N = len(prompts)
     if budget_force_saving:
+        # An issue with the force string is that it will likely prevent tokens like `"{`
+        # but this should be fine as we expect some ABC letter after the "
+        # Alternatively, could only force the special token, but then it may be a different tool call
         if saving_prompt == "summary_maybe":
             force_saving_str = '\n' + args.tool_tokens[0] + '\n{"name": "save", "arguments": {"summary": "'
         else:
@@ -219,6 +224,15 @@ def generate_with_tool_batch(
         budget_force_saving_net = budget_force_saving - force_saving_len
         args.max_completion_length -= budget_force_saving
         is_forced = [False] * N # To track if last saving was forced
+
+    sep_str = "<|im_end|>\n<|im_start|>assistant\n"
+    sep_str_len = len(sep_str)
+    if (add_ctxt_counter) and (max_saving > 0):
+        counter_str = "\n\nThis is context {}" + f"/{max_saving+1}."
+        # Optional explanation:
+        if add_ctxt_expl:
+            counter_str += f" You may think for {str(int(args.max_completion_length))} tokens per context. For contexts 2-{max_saving+1}, the first {str(int(save_last_k))} thinking tokens will be copied over from the previous context. If you run out of tokens, the last {str(int(save_last_k))} tokens will be copied over to your next context, except if it is the final context ({max_saving+1})."
+        prompts = [p[:-sep_str_len] + counter_str.format(1) + sep_str for p in prompts]
 
     contexts = prompts[:]
     prompts_len = [len(p) for p in prompts]
@@ -338,7 +352,12 @@ def generate_with_tool_batch(
 
                     saving_txt_next = tokenizer.decode(toks[-(save_last_k-2):]) # Subtract 2 for think & \n
                     add = args.thinking_tokens[0] + "\n" + saving_txt_next
-                    contexts[global_i] = contexts[global_i][:prompts_len[global_i]] + add
+
+                    if add_ctxt_counter:
+                        # contexts[global_i] = contexts[global_i][:prompts_len[global_i]-sep_str_len] + counter_str.format(stats[global_i]['num_saving'] + 2) + add
+                        contexts[global_i] = contexts[global_i][:prompts_len[global_i]].replace(f"This is context {stats[global_i]['num_saving'] + 1}/", f"This is context {stats[global_i]['num_saving'] + 2}/") + add
+                    else:
+                        contexts[global_i] = contexts[global_i][:prompts_len[global_i]] + add
 
                     tokens_left[global_i] = args.max_completion_length
                     if subtract:

@@ -677,6 +677,27 @@ class GRPOConfig(TrainingArguments):
         },
     )
 
+    add_ctxt_counter: bool = field(
+        default=False,
+        metadata={
+            "help": "Whether to add a context counter in prompt."
+        },
+    )
+
+    add_ctxt_expl: bool = field(
+        default=False,
+        metadata={
+            "help": "Whether to add a context explanation in prompt."
+        },
+    )
+
+    randomize_saving: bool = field(
+        default=False,
+        metadata={
+            "help": "Whether to randomize the max saving in tool use."
+        },
+    )
+
     def __post_init__(self):
         super().__post_init__()
 
