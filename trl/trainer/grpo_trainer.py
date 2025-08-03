@@ -221,7 +221,7 @@ def nanstd(tensor: torch.Tensor) -> torch.Tensor:
     return torch.sqrt(variance)
 
 
-def split_tensor_dict(
+def split_tensor_dict_old(
     tensor_dict: dict[str, Optional[torch.Tensor]], num_chunks: int
 ) -> list[dict[str, Optional[torch.Tensor]]]:
     """
@@ -243,6 +243,47 @@ def split_tensor_dict(
     return [
         {
             key: tensor[i * chunk_size : (i + 1) * chunk_size] if tensor is not None else None
+            for key, tensor in tensor_dict.items()
+        }
+        for i in range(num_chunks)
+    ]
+
+def split_tensor_dict(
+    tensor_dict: dict[str, Optional[torch.Tensor]], num_chunks: int
+) -> list[dict[str, Optional[torch.Tensor]]]:
+    """
+    Splits a dictionary of tensors along the first dimension into num_chunks approximately equal parts.
+
+    Extra elements (if any) are distributed among the first chunks to avoid a single large remainder.
+
+    Example:
+        >>> x = torch.arange(14).reshape(7, 2)
+        >>> y = torch.arange(7).reshape(7, 1)
+        >>> tensor_dict = {"x": x, "y": y}
+        >>> split_tensor_dict(tensor_dict, 3)
+        [
+            {"x": tensor([[0, 1], [2, 3], [4, 5]]), "y": tensor([[0], [1], [2]])},
+            {"x": tensor([[6, 7], [8, 9]]), "y": tensor([[3], [4]])},
+            {"x": tensor([[10, 11], [12, 13]]), "y": tensor([[5], [6]])}
+        ]
+    """
+    first_tensor = next(tensor for tensor in tensor_dict.values() if tensor is not None)
+    total = first_tensor.shape[0]
+    base_chunk_size = total // num_chunks
+    remainder = total % num_chunks
+
+    # Compute the sizes of each chunk
+    chunk_sizes = [base_chunk_size + (1 if i < remainder else 0) for i in range(num_chunks)]
+
+    # Compute the start and end indices for each chunk
+    indices = [0]
+    for size in chunk_sizes:
+        indices.append(indices[-1] + size)
+
+    # Build split dicts
+    return [
+        {
+            key: tensor[indices[i]:indices[i+1]] if tensor is not None else None
             for key, tensor in tensor_dict.items()
         }
         for i in range(num_chunks)
@@ -1831,7 +1872,7 @@ class GRPOTrainer(Trainer):
             import sys
             sys.exit(1)
 
-        import pdb; pdb.set_trace()
+        # import pdb; pdb.set_trace()
         if self.loss_type == "grpo":
             loss = ((per_token_loss * completion_mask).sum(-1) / completion_mask.sum(-1).clamp(min=1.0)).mean()
         elif self.loss_type == "bnpo":
