@@ -957,6 +957,52 @@ class GRPOTrainer(Trainer):
             input_ids_batch = input_ids[i : i + batch_size]
             attention_mask_batch = attention_mask[i : i + batch_size]
 
+            if (sw := os.environ.get("SW")):
+                # Create sliding window mask where every token can still attend to the prompt
+                sw = int(sw)
+                from transformers.masking_utils import create_sliding_window_causal_mask
+                B, S = attention_mask_batch.shape
+                prompt_mask_batch = prompt_mask[start : start + batch_size].to(torch.bool)
+                _, SP = prompt_mask_batch.shape
+                # Pad prompt_mask_batch
+                prompt_mask_batch = torch.nn.functional.pad(
+                    prompt_mask_batch,
+                    (0, S - SP),
+                    value=False,
+                )
+                # prompt_mask is now shape (B, S) boolean where True == prompt token (non-pad & before cutoff)                
+                # create an or_mask_function that returns True when kv_idx is a prompt token
+                def make_prompt_or_mask(prompt_mask: torch.Tensor):
+                    # signature must be: (batch_idx, head_idx, q_idx, kv_idx)
+                    def prompt_mask_fn(batch_idx, head_idx, q_idx, kv_idx):
+                        # same indexing style as transformers' padding_mask_function
+                        return prompt_mask[batch_idx, kv_idx]
+                    return prompt_mask_fn
+                
+                or_mask_fn = make_prompt_or_mask(prompt_mask_batch)
+                inputs_embeds = model.get_input_embeddings()(model_inputs['input_ids'])
+                q_len = inputs_embeds.shape[1]
+                cache_position = torch.arange(q_len, dtype=torch.long, device=attention_mask_batch.device)
+
+                conf = copy.copy(self.model.config)
+                setattr(conf, "sliding_window", sw)
+                setattr(conf, "use_sliding_window", True)
+                # import pdb; pdb.set_trace()
+                attention_mask_batch = create_sliding_window_causal_mask(
+                    config=conf,
+                    input_embeds=inputs_embeds,
+                    attention_mask=attention_mask_batch,    # 2D padding mask (B, S)
+                    cache_position=cache_position,          # 1D tensor of query positions
+                    past_key_values=None,        # pass if you have a Cache, else None
+                    or_mask_function=or_mask_fn,            # ensures prompt tokens are always attendable
+                    and_mask_function=None,
+                )
+                if (os.environ.get("LASTSW")):
+                    # Save memory by only taking the last bit
+                    max_pad = (attention_mask_batch[:, SP:] == 0).sum(1).max().item()
+                    logits_to_keep = min(logits_to_keep, max_pad+sw)
+
+
             # We add 1 to `logits_to_keep` because the last logits of the sequence is later excluded
             logits = model(
                 input_ids=input_ids_batch, attention_mask=attention_mask_batch, logits_to_keep=logits_to_keep + 1
@@ -1791,7 +1837,9 @@ class GRPOTrainer(Trainer):
         logits_to_keep = completion_ids.size(1)  # we only need to compute the logits for the completion tokens
 
         per_token_logps, entropies = self._get_per_token_logps(model, input_ids, attention_mask, logits_to_keep)
-
+        if os.environ.get("LASTSW") and (logits_to_keep != (lastsw := per_token_logps.size(1))):
+            completion_mask = completion_mask[:, -lastsw:]
+    
         # Compute the KL divergence between the model and the reference model
         if self.beta != 0.0:
             with torch.no_grad():
