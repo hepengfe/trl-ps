@@ -44,7 +44,10 @@ from ..import_utils import is_vllm_available
 
 if is_vllm_available():
     from vllm import LLM, SamplingParams
-    from vllm.sampling_params import GuidedDecodingParams
+    try:
+        from vllm.sampling_params import GuidedDecodingParams
+    except ImportError:
+        GuidedDecodingParams = None
 
 
 ################################################################################
