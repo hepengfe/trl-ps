@@ -58,9 +58,12 @@ def google_retriever(query, retrieve_websites = 2):
     ''' 
     base_url = 'https://www.googleapis.com/customsearch/v1'
     google_key = google_key_rotator.next()
+    cse_id = os.environ.get("GOOGLE_CSE_ID")
+    if not cse_id:
+        raise ValueError("GOOGLE_CSE_ID environment variable is not set")
     params = {
             'key': google_key,
-            'cx': '',
+            'cx': cse_id,
             'q': query,
             'num': retrieve_websites # The number of websites you want.
     }    

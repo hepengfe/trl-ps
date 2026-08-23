@@ -2,28 +2,36 @@ import itertools
 import os
 import openai
 
+
 class APIKeyRotator:
-    def __init__(self, keys):
+    def __init__(self, keys, name="API"):
+        self.name = name
+        self._keys = keys
         self.keys = itertools.cycle(keys)
 
     def next(self):
+        if not self._keys:
+            raise RuntimeError(
+                f"No {self.name} keys configured. Set the relevant environment variables."
+            )
         return next(self.keys)
 
-# OpenAI and Google key pools
-OPENAI_KEYS = [
-    os.getenv("OPENAI_KEY_1", ""),
-    os.getenv("OPENAI_KEY_2", ""),
-    # Add more keys as needed
-]
 
-GOOGLE_KEYS = [
-    # os.getenv("GOOGLE_KEY_1", ""),
-    os.getenv("GOOGLE_KEY_2", ""),
-]
+def _keys_from_env(*names):
+    seen = []
+    for name in names:
+        value = os.getenv(name)
+        if value and value not in seen:
+            seen.append(value)
+    return seen
 
-openai_key_rotator = APIKeyRotator(OPENAI_KEYS)
-google_key_rotator = APIKeyRotator(GOOGLE_KEYS)
+
+OPENAI_KEYS = _keys_from_env("OPENAI_KEY_1", "OPENAI_KEY_2", "OPENAI_API_KEY")
+GOOGLE_KEYS = _keys_from_env("GOOGLE_KEY_1", "GOOGLE_KEY_2", "GOOGLE_API_KEY")
+
+openai_key_rotator = APIKeyRotator(OPENAI_KEYS, name="OpenAI")
+google_key_rotator = APIKeyRotator(GOOGLE_KEYS, name="Google")
+
 
 def get_openai_client():
-    key = openai_key_rotator.next()
-    return openai.OpenAI(api_key=key)
+    return openai.OpenAI(api_key=openai_key_rotator.next())
