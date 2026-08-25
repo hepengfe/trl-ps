@@ -1296,7 +1296,7 @@ class GRPOTrainer(Trainer):
                         # tool inference using vllm
                         if self.accelerator.is_main_process:
                             with profiling_context(self, "vLLM.generate"):
-                                prompts, completions, tool_stats = self._generate_with_tool(all_prompts_text, 20)
+                                prompts, completions, tool_stats, _ = self._generate_with_tool(all_prompts_text, 20)
 
                             with open(READY_FILE, "w") as f:
                                 f.write("done")

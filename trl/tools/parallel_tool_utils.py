@@ -197,7 +197,7 @@ def generate_with_tool_batch(
     subtract: bool = False,
     add_ctxt_counter: bool = False,
     add_ctxt_expl: bool = False,
-) -> Tuple[List[str], List[str], List[Dict[str, int]]]:
+) -> Tuple[List[str], List[str], List[Dict[str, int]], List[str]]:
     """
     Parameters
     ----------
@@ -207,12 +207,13 @@ def generate_with_tool_batch(
         
     Returns
     -------
-    final_contexts
-        The fully-expanded conversation for every prompt (tool results +
-        answers).
+    prompts_to_return, completions_to_return
+        Saving windows (if return_saving) followed by one final per prompt.
     stats
         Per-prompt statistics: number of python / retrieval / saving calls, &
         total generated tokens.
+    completions_to_return_concatted
+        One string per prompt: that prompt's saving windows joined with its final.
     """
     N = len(prompts)
     if budget_force_saving:
@@ -415,14 +416,10 @@ def generate_with_tool_batch(
                 elif saving_prompt == "context_system":
                     # Context that you can use, but may be incorrect:
                     system = 'When context is passed to you, evaluate its correctness first and then use it if correct, below is an example.\n<|im_start|>user\nThere exist real numbers $x$ and $y$, both greater than 1, such that $\log_x\left(y^x\\right)=\log_y\left(x^{4y}\\right)=10$. Find $xy$.\n\nContext:\nMaybe convert logarithmic equations into exponential form to make them easier to handle. Via logarithm power rule log_x(y^x) = x * log_x(y) = 10. Noting that log_x(y) is the same as 1 / log_y(x). Maybe try express log_x(y) in terms of something else.<|im_end|>\n<|im_start|>assistant\n<think>\nOkay, so I need to first evaluate whether the context is correct and then use it to solve the problem.\n\nThe context suggests converting logarithmic equations into exponential form and using the logarithm power rule, which is a valid approach. It also notes that log_x(y) can be expressed in terms of log_y(x), which is correct. It suggests expressing log_x(y) in terms of something else.\n\nWait, do we really need to express log_x(y) in terms of something else? Maybe we can instead first use the logarithm power rule for the second equation as well. Let me do that...'
-                    add = f"\n\nContext:\n{summary}<|im_end|>\n<|im_start|>assistant\n"
-                    if stats[global_i]["num_saving"] == max_saving:
-                        prepend = "<|im_start|>system\n" + system + "<|im_end|>\n"
-                        user_start = contexts[global_i].rfind("<|im_start|>user\n") # Remove system prompt
-                    else:
-                        prepend = ""
-                        user_start = 0
-                    contexts[global_i] = prepend + contexts[global_i][user_start:prompts_len[global_i]-len("<|im_end|>\n<|im_start|>assistant\n")] + add                    
+                    orig = prompts[global_i]
+                    sys_prefix = orig[:orig.find("<|im_start|>user\n")] if stats[global_i]["num_saving"] < max_saving else "<|im_start|>system\n"
+                    contexts[global_i] = sys_prefix + system + "<|im_end|>\n" + orig[orig.rfind("<|im_start|>user\n"): len(orig) - sep_str_len] + f"\n\nContext:\n{summary}{sep_str}"
+                    prompts_len[global_i] = len(contexts[global_i])
                 elif saving_prompt == "summary_maybe":
                     add = f"\n\nSummary of your prior reasoning attempt that may be useful but could also be wrong:\n{summary}<|im_end|>\n<|im_start|>assistant\n"
                     if stats[global_i]["num_saving"] == max_saving:
@@ -540,4 +537,17 @@ def generate_with_tool_batch(
     # print("Generated tokens:", [stats[i]["generated_tokens"] for i in range(N)])
     print("Generated tokens avg:", sum(stats[i]["generated_tokens"] for i in range(N)) / N)
     print("Steps total:", step)
-    return prompts_to_return, completions_to_return, stats
+    finals = completions_to_return[-N:]
+    if return_saving:
+        savings = completions_to_return[:-N]
+        off = 0
+        completions_to_return_concatted = []
+        for i in range(N):
+            ns = stats[i]["num_saving"]
+            completions_to_return_concatted.append("".join(savings[off:off + ns]) + finals[i])
+            off += ns
+        if off != len(savings):
+            raise RuntimeError(f"saving window count {len(savings)} != sum(num_saving) {off}")
+    else:
+        completions_to_return_concatted = finals
+    return prompts_to_return, completions_to_return, stats, completions_to_return_concatted
