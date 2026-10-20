@@ -200,6 +200,29 @@ class SFTConfig(TrainingArguments):
         default=False,
         metadata={"help": "Whether to offload the activations to the CPU."},
     )
+    prefix_sliding_window: Optional[int] = field(
+        default=None,
+        metadata={
+            "help": (
+                "If set, enables prefix sliding during training: every token attends to the prompt (prefix) plus a "
+                "sliding window of this many recent tokens. Mirrors the `SW` mechanism in `GRPOTrainer`. Requires a "
+                "prompt-completion dataset with `completion_only_loss=True` (the prompt is identified as the tokens "
+                "whose labels are masked)."
+            )
+        },
+    )
+    train_on_last_n: Optional[int] = field(
+        default=None,
+        metadata={
+            "help": (
+                "If set, compute loss (and therefore gradients) only on the last N non-padding tokens of each "
+                "sequence; all earlier tokens keep their full attention context but have their labels set to -100 "
+                "(loss 0). This trains with a long attention context while backpropagating through only the last N "
+                "tokens. An alternative to `prefix_sliding_window` — that one limits the *attention*, this one limits "
+                "the *loss*; the two may be combined (window over attention + loss on the tail only)."
+            )
+        },
+    )
 
     # Deprecated parameters
     max_seq_length: Optional[int] = field(

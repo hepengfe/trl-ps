@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import contextlib
+import copy
 import dataclasses
 import os
 import warnings
@@ -84,6 +85,9 @@ class DataCollatorForLanguageModeling(DataCollatorMixin):
             that are no in the completion.
         pad_to_multiple_of (`int` or `None`, *optional*, defaults to `None`):
             If set, the sequences will be padded to a multiple of this value.
+        train_on_last_n (`int` or `None`, *optional*, defaults to `None`):
+            If set, mask (set to -100) all labels except the last N non-padding tokens of each sequence, so that loss
+            and gradients are computed only on those tokens while the full context still takes part in attention.
         return_tensors (`str`, *optional*, defaults to `"pt"`):
             Type of Tensor to return. Only `"pt"` is currently supported.
 
@@ -120,6 +124,7 @@ class DataCollatorForLanguageModeling(DataCollatorMixin):
     pad_token_id: int
     completion_only_loss: bool = True
     pad_to_multiple_of: Optional[int] = None
+    train_on_last_n: Optional[int] = None
     return_tensors: str = "pt"
 
     def torch_call(self, examples: list[Union[list[int], Any, dict[str, Any]]]) -> dict[str, Any]:
@@ -149,6 +154,15 @@ class DataCollatorForLanguageModeling(DataCollatorMixin):
                 completion_mask, padding_value=0, padding_side="right", pad_to_multiple_of=self.pad_to_multiple_of
             )
             output["labels"][completion_mask == 0] = -100  # mask everything that is not in the completion
+            output["completion_mask"] = completion_mask  # keep it so compute_loss can recover the true prompt boundary
+
+        if self.train_on_last_n is not None:
+            # Keep only the last `train_on_last_n` non-padding tokens of each sequence; earlier tokens keep their full
+            # attention context but their labels are masked so they contribute no loss/gradient.
+            non_pad = output["attention_mask"] == 1
+            rev_cumsum = non_pad.flip(dims=[1]).cumsum(dim=1).flip(dims=[1])  # count of non-pad tokens at/after each pos
+            keep = non_pad & (rev_cumsum <= self.train_on_last_n)
+            output["labels"][~keep] = -100
 
         return output
 
@@ -332,7 +346,7 @@ class SFTTrainer(Trainer):
                     "in the vocabulary before using it as a padding token."
                 )
             data_collator = DataCollatorForLanguageModeling(
-                pad_token_id, self.completion_only_loss, args.pad_to_multiple_of
+                pad_token_id, self.completion_only_loss, args.pad_to_multiple_of, args.train_on_last_n
             )
 
         # Dataset
@@ -668,18 +682,87 @@ class SFTTrainer(Trainer):
         if self._signature_columns is None:
             self._signature_columns = ["input_ids", "attention_mask", "completion_mask"]
 
+    def _build_prefix_sliding_mask(self, model, input_ids, attention_mask, prompt_mask, sliding_window):
+        """
+        Build a `(B, 1, S, S)` prefix-sliding causal attention mask.
+
+        Every query token attends to (1) all prompt/prefix tokens (positions where `prompt_mask` is `True`) and
+        (2) the previous `sliding_window` tokens. This mirrors the prefix-sliding mask built in
+        `GRPOTrainer._get_per_token_logps`.
+        """
+        from transformers.masking_utils import create_sliding_window_causal_mask
+
+        inputs_embeds = model.get_input_embeddings()(input_ids)
+        seq_len = inputs_embeds.shape[1]
+        cache_position = torch.arange(seq_len, dtype=torch.long, device=input_ids.device)
+
+        # NOTE: with DeepSpeed the `model` here is the DeepSpeed engine, whose `.config` is the
+        # DeepSpeed config dict (not the HF model config). Unwrap to the underlying module first.
+        config = copy.copy(getattr(model, "module", model).config)
+        config.sliding_window = sliding_window
+        config.use_sliding_window = True
+
+        def make_prompt_or_mask(prompt_mask):
+            # Signature must be (batch_idx, head_idx, q_idx, kv_idx), matching transformers'
+            # `padding_mask_function` indexing style: return True when kv_idx is a prompt token.
+            def prompt_mask_fn(batch_idx, head_idx, q_idx, kv_idx):
+                return prompt_mask[batch_idx, kv_idx]
+
+            return prompt_mask_fn
+
+        return create_sliding_window_causal_mask(
+            config=config,
+            input_embeds=inputs_embeds,
+            attention_mask=attention_mask,  # 2D padding mask (B, S)
+            cache_position=cache_position,
+            past_key_values=None,
+            or_mask_function=make_prompt_or_mask(prompt_mask),
+            and_mask_function=None,
+        )
+
+    def _prepare_prefix_sliding_inputs(self, model, inputs):
+        """Pop the collator's `completion_mask` and, if `prefix_sliding_window` is set, swap the 2D attention mask
+        for the 4D prefix-sliding mask.
+
+        Returns `(inputs, attention_mask_2d)` where `attention_mask_2d` is the original 2D mask (or `None`) so the
+        caller can still compute the true non-padding token count. The `completion_mask` is never forwarded to the
+        model; it is used here to recover the *true* prompt boundary even when `train_on_last_n` also masks early
+        completion tokens to -100 (which would otherwise be mistaken for the prompt).
+        """
+        attention_mask_2d = None
+        completion_mask = inputs.get("completion_mask", None)
+        if completion_mask is not None or self.args.prefix_sliding_window:
+            inputs = dict(inputs)  # avoid mutating the caller's dict
+            completion_mask = inputs.pop("completion_mask", None)
+        if self.args.prefix_sliding_window:
+            attention_mask_2d = inputs["attention_mask"]
+            if completion_mask is not None:
+                prompt_mask = (attention_mask_2d == 1) & (completion_mask == 0)
+            else:
+                prompt_mask = (attention_mask_2d == 1) & (inputs["labels"] == -100)
+            inputs["attention_mask"] = self._build_prefix_sliding_mask(
+                model, inputs["input_ids"], attention_mask_2d, prompt_mask, self.args.prefix_sliding_window
+            )
+        return inputs, attention_mask_2d
+
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
         """
         Compute training loss and additionally compute token accuracies
         """
         mode = "train" if self.model.training else "eval"
+        # Pop the collator's `completion_mask` and, when prefix sliding is enabled, replace the 2D attention mask with
+        # a 4D prefix-sliding mask: every token attends to the prompt (prefix) plus a sliding window of
+        # `prefix_sliding_window` recent tokens.
+        inputs, attention_mask_2d = self._prepare_prefix_sliding_inputs(model, inputs)
         (loss, outputs) = super().compute_loss(
             model, inputs, return_outputs=True, num_items_in_batch=num_items_in_batch
         )
         if mode == "train":
             # When using padding-free, the attention_mask is not present in the inputs, instead we have cu_seq_lens_q,
             # cu_seq_lens_k, and max_length_k, max_length_q and position_ids.
-            if "attention_mask" in inputs:
+            if attention_mask_2d is not None:
+                num_tokens_in_batch = self.accelerator.gather_for_metrics(attention_mask_2d.sum()).sum().item()
+            elif "attention_mask" in inputs:
                 num_tokens_in_batch = self.accelerator.gather_for_metrics(inputs["attention_mask"].sum()).sum().item()
             elif "position_ids" in inputs:
                 local_num_tokens = torch.tensor(inputs["position_ids"].size(1), device=inputs["position_ids"].device)
